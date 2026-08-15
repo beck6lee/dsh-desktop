@@ -956,20 +956,28 @@ impl ServerManager {
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
             if self.stop_requested.load(Ordering::SeqCst) {
+                // 中止前清理已 spawn 的子进程，避免孤儿（复审跟进）
+                self.stop_owned();
                 return;
             }
             if is_dsh_running(port) {
                 *self.state.lock().unwrap() = ServerState::Ready { port };
                 return;
             }
-            // 子进程提前退出 → 快速失败，报出真实原因（避免白等 30s）
-            if let Some(child) = self.child.lock().unwrap().as_mut() {
-                if let Ok(Some(status)) = child.try_wait() {
-                    self.stop_owned();
-                    *self.state.lock().unwrap() =
-                        ServerState::Error(format!("dsh 进程提前退出: {status}"));
-                    return;
-                }
+            // 子进程提前退出 → 快速失败，报出真实原因（避免白等 30s）。
+            // 注意：结果绑定到 owned 局部变量，guard 在语句结束即释放，
+            // stop_owned 不得在持有 child 锁时调用（否则非重入 Mutex 死锁）。
+            let exited = self
+                .child
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|c| c.try_wait().ok().flatten());
+            if let Some(status) = exited {
+                self.stop_owned();
+                *self.state.lock().unwrap() =
+                    ServerState::Error(format!("dsh 进程提前退出: {status}"));
+                return;
             }
             if Instant::now() >= deadline {
                 self.stop_owned();
