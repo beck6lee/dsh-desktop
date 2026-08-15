@@ -16,6 +16,8 @@ npm run build   # 产物：src-tauri/target/release/bundle/macos/DeepSeek Harnes
 
 **托盘驻留**：点窗口关闭按钮（红点）会隐藏到菜单栏托盘（鲸鱼娘图标），应用和服务继续运行；托盘菜单可「显示/隐藏窗口」或「退出」；点 Dock 图标可恢复窗口。Cmd+Q 或托盘「退出」才会停止服务。
 
+**检查更新**：托盘菜单显示当前使用的 dsh 版本并自动核对官方最新版（启动时 + 「检查更新」手动刷新）。应用不打包 dsh——它解析并使用本机安装的 dsh（PATH 或 npx 缓存），所以官方 DSH 更新后，重启应用即自动使用新版。
+
 > 应用未签名/未公证，首次双击若被 Gatekeeper 拦截，请右键 → 打开，或执行 `xattr -dr com.apple.quarantine "/path/to/DeepSeek Harness.app"`。
 
 ## 环境变量（可选）
