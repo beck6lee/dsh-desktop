@@ -15,6 +15,17 @@ window.__ModuleLoader__.load({
 
     var inject = ['slots']
 
+    // 命令历史：按 sessionId 记忆（页面会话内跨重挂载存活），↑/↓ 在命令模式浏览
+    var HISTORY = Object.create(null)
+    var HISTORY_CAP = 50
+    function pushHistory(sessionId, cmd) {
+      var list = HISTORY[sessionId] || (HISTORY[sessionId] = [])
+      if (list[list.length - 1] !== cmd) {
+        list.push(cmd)
+        if (list.length > HISTORY_CAP) list.splice(0, list.length - HISTORY_CAP)
+      }
+    }
+
     function apply(ctx) {
       var slots = ctx.slots
 
@@ -49,6 +60,7 @@ window.__ModuleLoader__.load({
       function runCommand(draft, sessionId, setView) {
         var cmd = draft.trim().slice(1).trim()
         if (!cmd) return
+        pushHistory(sessionId, cmd)
         setView({ running: true, result: null })
         fetch('/warp/run', {
           method: 'POST',
@@ -80,11 +92,21 @@ window.__ModuleLoader__.load({
         var setView = state[1]
         var running = view.running
         var result = view.result
+        // 命令历史浏览：idx=-1 表示未在浏览；pending 保存浏览前的草稿
+        var idxState = React.useState(-1)
+        var idx = idxState[0]
+        var setIdx = idxState[1]
+        var pendingState = React.useState('')
+        var pending = pendingState[0]
+        var setPending = pendingState[1]
+        var historyList = (HISTORY[sessionId] || [])
 
         function send() {
           if (isCommand) {
             runCommand(draft, sessionId, setView)
             if (typeof inputActions.setDraft === 'function') inputActions.setDraft('')
+            if (idx !== -1) setIdx(-1)
+            if (pending) setPending('')
           } else if (typeof inputActions.submit === 'function') {
             inputActions.submit()
           }
@@ -94,6 +116,28 @@ window.__ModuleLoader__.load({
           if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault()
             send()
+            return
+          }
+          // 命令模式下 ↑/↓ 浏览历史；非命令模式保留 textarea 默认行为
+          if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && isCommand && !e.nativeEvent.isComposing) {
+            if (historyList.length === 0) return
+            e.preventDefault()
+            if (e.key === 'ArrowUp') {
+              if (idx === -1) setPending(draft)
+              var up = idx === -1 ? historyList.length - 1 : Math.max(0, idx - 1)
+              setIdx(up)
+              if (typeof inputActions.setDraft === 'function') inputActions.setDraft('$ ' + historyList[up])
+            } else {
+              if (idx === -1) return
+              var down = idx + 1
+              if (down >= historyList.length) {
+                setIdx(-1)
+                if (typeof inputActions.setDraft === 'function') inputActions.setDraft(pending)
+              } else {
+                setIdx(down)
+                if (typeof inputActions.setDraft === 'function') inputActions.setDraft('$ ' + historyList[down])
+              }
+            }
           }
         }
 
@@ -127,6 +171,11 @@ window.__ModuleLoader__.load({
             value: draft,
             placeholder: isCommand ? '在会话目录执行命令…' : '对话消息；以 $ 开头为命令（如 $ ls -la）',
             onChange: function (e) {
+              // 手动编辑时退出历史浏览
+              if (idx !== -1) {
+                setIdx(-1)
+                setPending('')
+              }
               if (typeof inputActions.setDraft === 'function') inputActions.setDraft(e.target.value)
             },
             onKeyDown: onKeyDown,
@@ -135,6 +184,9 @@ window.__ModuleLoader__.load({
           React.createElement('div', { className: 'warp-row' },
             React.createElement('span', { className: isCommand ? 'warp-badge' : 'warp-badge warp-badge-chat' },
               isCommand ? '$ 命令' : '对话'),
+            (isCommand && historyList.length > 0)
+              ? React.createElement('span', { className: 'warp-hint' }, '↑/↓ 历史')
+              : null,
             running
               ? React.createElement('span', { className: 'warp-pill warp-pill-run' }, '运行中…')
               : null,
