@@ -1,7 +1,90 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8" /><title>DeepSeek Harness</title></head>
-<body style="margin:0;background:#0b1220;color:#e2e8f0;font-family:-apple-system,sans-serif">
-  <p style="padding:20px">DeepSeek Harness 桌面端（占位）</p>
+<head>
+<meta charset="utf-8" />
+<title>DeepSeek Harness</title>
+<style>
+  :root { --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0b1220; color: #e2e8f0; }
+  #statusbar { display: flex; align-items: center; gap: 10px; padding: 6px 14px; background: #111a2e; border-bottom: 1px solid #1e293b; font-size: 13px; user-select: none; }
+  #dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); }
+  #dot.starting { background: var(--warn); animation: pulse 1.2s infinite; }
+  #dot.ready, #dot.reused { background: var(--ok); }
+  #dot.error { background: var(--err); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  #status-text { flex: 1; }
+  #restart { display: none; padding: 3px 12px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; font-size: 12px; }
+  #restart:hover { background: #334155; }
+  #restart.show { display: inline-block; }
+  #frame { flex: 1; width: 100%; border: 0; background: #fff; }
+</style>
+</head>
+<body>
+  <div id="statusbar">
+    <span id="dot" class="starting"></span>
+    <span id="status-text">正在启动 DSH 服务…</span>
+    <button id="restart">重启服务</button>
+  </div>
+  <iframe id="frame" src="about:blank" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+  <script>
+    const tauri = window.__TAURI__;
+    const $ = (id) => document.getElementById(id);
+    const frame = $('frame');
+    let currentPort = null;
+
+    function render(snapshot) {
+      const dot = $('dot');
+      const text = $('status-text');
+      const restart = $('restart');
+      dot.className = '';
+      const st = snapshot.state;
+      if (st === 'starting') {
+        dot.classList.add('starting');
+        text.textContent = '正在启动 DSH 服务…';
+        restart.classList.remove('show');
+      } else if (st === 'ready') {
+        dot.classList.add('ready');
+        text.textContent = '已就绪 · 端口 ' + snapshot.port;
+        restart.classList.remove('show');
+      } else if (st === 'reused') {
+        dot.classList.add('reused');
+        text.textContent = '复用已有服务 · 端口 ' + snapshot.port;
+        restart.classList.remove('show');
+      } else {
+        dot.classList.add('error');
+        text.textContent = '服务异常：' + (snapshot.error || '未知错误');
+        restart.classList.add('show');
+      }
+      const port = (st === 'ready' || st === 'reused') ? snapshot.port : null;
+      if (port && port !== currentPort) {
+        currentPort = port;
+        frame.src = 'http://127.0.0.1:' + port;
+      }
+    }
+
+    async function poll() {
+      try {
+        render(await tauri.core.invoke('server_status'));
+      } catch (e) {
+        $('status-text').textContent = '状态查询失败：' + e;
+      }
+      setTimeout(poll, 2000);
+    }
+
+    $('restart').addEventListener('click', async () => {
+      $('restart').disabled = true;
+      try { await tauri.core.invoke('restart_server'); } catch (e) { console.error(e); }
+      $('restart').disabled = false;
+    });
+
+    if (!tauri) {
+      frame.src = 'http://127.0.0.1:3080';
+      $('status-text').textContent = '浏览器预览模式（非桌面运行时）';
+    } else {
+      poll();
+    }
+  </script>
 </body>
 </html>
