@@ -34,6 +34,8 @@ window.__ModuleLoader__.load({
       if (!t) return 'conversation'
       if (t.charAt(0) === '$') return 'command'
       if (t.charAt(0) === '`' && t.charAt(t.length - 1) === '`' && t.length > 2) return 'command'
+      // 斜杠行（/run xxx、/plan xxx 等）：交给机器内建斜杠裁决，绝不包 /run
+      if (t.charAt(0) === '/') return 'conversation'
       if (hasCJK(t)) return 'conversation'
       var first = t.split(/\s+/)[0].toLowerCase()
       if (COMMAND_WORDS.has(first)) return 'command'
@@ -143,6 +145,11 @@ window.__ModuleLoader__.load({
         var submitCommand = function (draft) {
           var cmd = stripPrefix(draft)
           if (!cmd) return
+          // 斜杠行直接提交（机器裁决），不包 /run，避免 /run /run xxx
+          if (cmd.charAt(0) === '/') {
+            if (typeof inputActions.submit === 'function') inputActions.submit()
+            return
+          }
           pushHistory(sessionId, cmd)
           if (typeof inputActions.setDraft === 'function') inputActions.setDraft('/run ' + cmd)
           if (typeof inputActions.submit === 'function') inputActions.submit()
