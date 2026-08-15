@@ -199,7 +199,10 @@ window.__ModuleLoader__.load({
             send()
             return
           }
-          if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && isCommand && !e.nativeEvent.isComposing) {
+          // ↑/↓ 历史：命令模式或空草稿（空输入时 ↑ 召回上一条命令，终端习惯）；
+          // 非命令的非空草稿保留 textarea 默认行为
+          if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.nativeEvent.isComposing
+            && (isCommand || draft.trim() === '')) {
             if (historyList.length === 0) return
             e.preventDefault()
             if (e.key === 'ArrowUp') {
