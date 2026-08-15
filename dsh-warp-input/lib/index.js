@@ -27,6 +27,9 @@ export function apply(ctx) {
   const register = () => commands.register({
     name: 'run',
     description: '在会话目录执行 shell 命令并显示结果',
+    // 必须有 input 描述符：ui-commands 的 matchEnter 对「带参数的裸命令且无 input」直接放弃，
+    // 加上后才把参数交给 claim.submit → commands.execute（否则 /run ls 会回退成普通消息）。
+    input: { hint: 'shell 命令' },
     handler: async (invocation) => {
       const line = (invocation.rawInput || '').trim()
       if (!line) return { kind: 'error', text: '空命令' }
