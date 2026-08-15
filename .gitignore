@@ -1,0 +1,11 @@
+# superpowers brainstorm sessions
+.superpowers/
+
+# node / build artifacts
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# macOS
+.DS_Store
