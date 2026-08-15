@@ -287,22 +287,30 @@ impl ServerManager {
         *self.child.lock().unwrap() = Some(child);
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
-            // 中止标志：stop() 请求后不再等待就绪，立即退出（in-flight 启动不阻塞退出）
+            // 中止标志：stop() 请求后不再等待就绪，立即退出（in-flight 启动不阻塞退出）。
+            // 返回前 stop_owned：stop() 可能发生在 start() 的 store(false) 与拿锁之间，
+            // 直接 return 会留下孤儿 dsh 进程。
             if self.stop_requested.load(Ordering::SeqCst) {
+                self.stop_owned();
                 return;
             }
             if is_dsh_running(port) {
                 *self.state.lock().unwrap() = ServerState::Ready { port };
                 return;
             }
-            // 子进程提前退出 → 快速失败，报出真实原因（避免白等 30s）
-            if let Some(child) = self.child.lock().unwrap().as_mut() {
-                if let Ok(Some(status)) = child.try_wait() {
-                    self.stop_owned();
-                    *self.state.lock().unwrap() =
-                        ServerState::Error(format!("dsh 进程提前退出: {status}"));
-                    return;
-                }
+            // 子进程提前退出 → 快速失败，报出真实原因（避免白等 30s）。
+            // 先取结果再释放 guard：不能在持有 self.child 锁时调用 stop_owned（非重入死锁）。
+            let exited = self
+                .child
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|c| c.try_wait().ok().flatten());
+            if let Some(status) = exited {
+                self.stop_owned();
+                *self.state.lock().unwrap() =
+                    ServerState::Error(format!("dsh 进程提前退出: {status}"));
+                return;
             }
             if Instant::now() >= deadline {
                 self.stop_owned();
