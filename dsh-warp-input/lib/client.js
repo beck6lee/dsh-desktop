@@ -93,6 +93,15 @@ window.__ModuleLoader__.load({
         '.warp-send { margin-left:auto; border:none; border-radius:10px; background:var(--dsw-alias-state-business-primary); color:#fff; font-size:13px; padding:6px 14px; cursor:pointer; }',
         '.warp-send:disabled { opacity:.5; cursor:default; }',
         '.warp-hint { color:var(--dsw-alias-label-caption); font-size:11px; }',
+        '.warp-cmdview { display:flex; flex-direction:column; gap:6px; min-width:0; }',
+        '.warp-cmdview-head { display:flex; align-items:center; gap:8px; min-width:0; }',
+        '.warp-cmdview-name { color:var(--dsw-alias-label-secondary); font:12px/18px var(--ds-font-family-code, monospace); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }',
+        '.warp-cmdview-pill { font:11px/16px var(--ds-font-family-code, monospace); border-radius:999px; padding:1px 8px; flex:none; }',
+        '.warp-cmdview-ok { color:var(--dsw-alias-state-success-primary); background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent); }',
+        '.warp-cmdview-err { color:var(--dsw-alias-state-error-primary); background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent); }',
+        '.warp-cmdview-run { color:var(--dsw-alias-state-warn-label); background:color-mix(in srgb, var(--dsw-alias-state-warn-label) 14%, transparent); }',
+        '.warp-cmdview-body { margin:0; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-layer-1); border-radius:8px; padding:8px 10px; font:12px/19px var(--ds-font-family-code, monospace); white-space:pre-wrap; word-break:break-all; max-height:360px; overflow:auto; }',
+        '.warp-cmdview-errbody { color:var(--dsw-alias-state-error-primary); }',
       ].join('\n')
 
       ctx.effect(function () {
@@ -223,6 +232,43 @@ window.__ModuleLoader__.load({
           ),
         )
       }
+
+      // ---- /run 命令的对话流视图：默认展开完整输出 ----
+      function RunCommandView(props) {
+        var node = props.node
+        var args = (node && node.args ? String(node.args).trim() : '')
+        var outcome = node ? node.outcome : null
+        var head = '/run' + (args ? ' ' + args : '')
+        var pill
+        if (!outcome) {
+          pill = { cls: 'warp-cmdview-run', text: '执行中…' }
+        } else if (outcome.kind === 'success') {
+          pill = { cls: 'warp-cmdview-ok', text: 'exit 0' }
+        } else {
+          pill = { cls: 'warp-cmdview-err', text: '失败' }
+        }
+        var text = outcome && outcome.text ? String(outcome.text) : ''
+        return React.createElement('div', { className: 'warp-cmdview' },
+          React.createElement('div', { className: 'warp-cmdview-head' },
+            React.createElement('span', { className: 'warp-cmdview-name', title: head }, head),
+            React.createElement('span', { className: 'warp-cmdview-pill ' + pill.cls }, pill.text),
+          ),
+          text
+            ? React.createElement('pre', {
+                className: 'warp-cmdview-body' + (outcome && outcome.kind === 'error' ? ' warp-cmdview-errbody' : ''),
+              }, text)
+            : null,
+        )
+      }
+
+      slots.inject('conversation.chat.commandview', function () {
+        return slots.register({
+          name: 'conversation.chat.commandview',
+          key: 'run',
+        }, function (props) {
+          return React.createElement(RunCommandView, props)
+        })
+      })
 
       slots.inject('conversation.composer', function () {
         return slots.register({
