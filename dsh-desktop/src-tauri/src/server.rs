@@ -333,6 +333,8 @@ impl ServerManager {
     pub fn status(&self) -> StatusSnapshot {
         // 存活检查（spec 验收 5：手动 kill 服务后状态栏应转异常）：
         // 同一锁内检测子进程退出并清空句柄，避免后续对已收割 pid 误发信号。
+        // 理论上：若并发 start() 在此之后替换了 child，child_exited 会指向旧进程；
+        // 实际不可达（gap 为微秒级，而 start_inner 至少耗时数百毫秒），且下一轮轮询即自愈。
         let child_exited = {
             let mut guard = self.child.lock().unwrap();
             let exited = guard
@@ -349,7 +351,11 @@ impl ServerManager {
             match &*st {
                 ServerState::Ready { port } if child_exited || !is_dsh_running(*port) => {
                     *st = ServerState::Error("服务已停止（进程退出或端口无响应）".to_string());
-                    self.owned.store(false, Ordering::SeqCst);
+                    // 仅当确认子进程已退出才移交 owned：探测误报（进程仍存活）时
+                    // 保留 owned，重启/退出仍会清理，避免孤儿。
+                    if child_exited {
+                        self.owned.store(false, Ordering::SeqCst);
+                    }
                     (
                         "error".to_string(),
                         None,
