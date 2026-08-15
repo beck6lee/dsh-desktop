@@ -55,12 +55,16 @@
       } else {
         dot.classList.add('error');
         text.textContent = '服务异常：' + (snapshot.error || '未知错误');
+        restart.disabled = false;
         restart.classList.add('show');
       }
-      const port = (st === 'ready' || st === 'reused') ? snapshot.port : null;
-      if (port && port !== currentPort) {
-        currentPort = port;
-        frame.src = 'http://127.0.0.1:' + port;
+      const available = (st === 'ready' || st === 'reused');
+      if (!available) {
+        currentPort = null;
+        frame.src = 'about:blank';
+      } else if (snapshot.port && snapshot.port !== currentPort) {
+        currentPort = snapshot.port;
+        frame.src = 'http://127.0.0.1:' + snapshot.port;
       }
     }
 
@@ -75,8 +79,8 @@
 
     $('restart').addEventListener('click', async () => {
       $('restart').disabled = true;
+      $('restart').classList.remove('show');
       try { await tauri.core.invoke('restart_server'); } catch (e) { console.error(e); }
-      $('restart').disabled = false;
     });
 
     if (!tauri) {
