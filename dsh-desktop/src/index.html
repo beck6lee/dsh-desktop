@@ -7,10 +7,8 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; overflow: hidden; }
   body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0b1220; color: #e2e8f0; }
-  #frame { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
-  /* 启动遮罩：服务就绪后淡出，不常驻；异常时显示错误 + 重启 */
-  #boot { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #0b1220; opacity: 1; transition: opacity .25s ease; }
-  #boot.hidden { opacity: 0; pointer-events: none; }
+  /* 启动遮罩：服务就绪后整窗导航到 DSH（顶层页，localStorage 可持久化 → 恢复上次会话） */
+  #boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #0b1220; }
   .spinner { width: 26px; height: 26px; border: 3px solid #1e293b; border-top-color: #3b82f6; border-radius: 50%; animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   #boot-text { font-size: 13px; color: #94a3b8; }
@@ -19,7 +17,6 @@
 </style>
 </head>
 <body>
-  <iframe id="frame" src="about:blank" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
   <div id="boot">
     <div class="spinner"></div>
     <div id="boot-text">正在启动 DSH…</div>
@@ -28,51 +25,24 @@
   <script>
     const tauri = window.__TAURI__;
     const $ = (id) => document.getElementById(id);
-    const frame = $('frame');
     const boot = $('boot');
-    let currentPort = null;
-    let fast = true; // 就绪前快速轮询（250ms），就绪后 2s
-    let readyToShow = false; // iframe 真实加载完成才淡出遮罩，避免白闪
-    let fadeTimer = null;
+    let fast = true; // 就绪前快速轮询（250ms）
 
     function render(snapshot) {
       const st = snapshot.state;
-      const restart = $('boot-restart');
       if (st === 'ready' || st === 'reused') {
-        fast = false;
-        if (snapshot.port && snapshot.port !== currentPort) {
-          currentPort = snapshot.port;
-          frame.src = 'http://127.0.0.1:' + snapshot.port;
-          readyToShow = false;
-          // 兜底：3s 内 iframe 未触发 load 也淡出，避免遮罩卡住
-          clearTimeout(fadeTimer);
-          fadeTimer = setTimeout(function () {
-            if (!readyToShow) { readyToShow = true; boot.classList.add('hidden'); }
-          }, 3000);
-        } else if (readyToShow) {
-          boot.classList.add('hidden');
-        }
+        // 整窗导航到 DSH：顶层页面 → localStorage 持久化 → 恢复上次会话
+        window.location.replace('http://127.0.0.1:' + snapshot.port);
       } else if (st === 'error') {
         fast = true;
-        boot.classList.remove('hidden');
         $('boot-text').textContent = '服务异常：' + (snapshot.error || '未知错误');
-        restart.style.display = 'inline-block';
+        $('boot-restart').style.display = 'inline-block';
       } else {
         fast = true;
-        boot.classList.remove('hidden');
         $('boot-text').textContent = '正在启动 DSH…';
-        restart.style.display = 'none';
+        $('boot-restart').style.display = 'none';
       }
     }
-
-    // 真实 iframe 内容加载完成后才淡出遮罩（about:blank 初始 load 由 currentPort 守卫排除）
-    frame.addEventListener('load', function () {
-      if (currentPort !== null) {
-        clearTimeout(fadeTimer);
-        readyToShow = true;
-        boot.classList.add('hidden');
-      }
-    });
 
     async function poll() {
       try {
@@ -90,8 +60,8 @@
     });
 
     if (!tauri) {
-      frame.src = 'http://127.0.0.1:3080';
-      boot.style.display = 'none';
+      // 浏览器预览模式：直接打开
+      window.location.replace('http://127.0.0.1:3080');
     } else {
       poll();
     }
