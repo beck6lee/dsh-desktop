@@ -12,6 +12,7 @@
 - 首次 `cargo` 编译需下载编译大量 crate，约 5–15 分钟，务必用后台任务执行。
 - 当前 3080 端口正被本会话的 DSH 占用 → 应用会走「复用」路径；「自启自停」路径用 `DSH_DESKTOP_PORT=3999` 验收（见 Task 9），避免误杀正在运行的会话。
 - 所有 `cd` 均在 `dsh-desktop/` 下执行；git 在 `dsh-workspace/` 根目录。
+- ⚠️ 沙箱环境（必须）：文件沙箱禁止写 `~/.npm` 与 `~/.cargo`。所有 npm/npx 命令加 `export npm_config_cache=/tmp/dsh-npm-cache`；所有 cargo 命令用 `export CARGO_HOME=/tmp/dsh-cargo-home`（首次运行前 `mkdir -p /tmp/dsh-cargo-home`）。**不要**复制 `~/.cargo/config.toml`（tuna 镜像与 Cargo.lock 可能不同步导致解析失败；已实测直连 crates.io 可用且与 lock 一致）。
 
 ---
 
@@ -841,6 +842,8 @@ pub fn kill_group(child: &Child) {
 // ---------- 管理器 ----------
 
 pub struct ServerManager {
+    /// 串行化 start/stop/restart，避免退出与重启竞态（Task 3 质量审查要求）。
+    lifecycle: Mutex<()>,
     child: Mutex<Option<Child>>,
     owned: AtomicBool,
     port: Mutex<u16>,
@@ -850,6 +853,7 @@ pub struct ServerManager {
 impl ServerManager {
     pub fn new() -> Self {
         Self {
+            lifecycle: Mutex::new(()),
             child: Mutex::new(None),
             owned: AtomicBool::new(false),
             port: Mutex::new(0),
@@ -859,6 +863,25 @@ impl ServerManager {
 
     /// 阻塞式启动：复用检测 → 选端口 → spawn → 轮询就绪。由调用方放入线程。
     pub fn start(&self) {
+        let _guard = self.lifecycle.lock().unwrap();
+        self.start_inner();
+    }
+
+    /// 仅当服务由本应用启动时才停止（复用中的服务不杀）。
+    pub fn stop(&self) {
+        let _guard = self.lifecycle.lock().unwrap();
+        if self.owned.load(Ordering::SeqCst) {
+            self.stop_owned();
+        }
+    }
+
+    pub fn restart(&self) {
+        let _guard = self.lifecycle.lock().unwrap();
+        self.stop_owned();
+        self.start_inner();
+    }
+
+    fn start_inner(&self) {
         *self.state.lock().unwrap() = ServerState::Starting;
         let default_port: u16 = std::env::var("DSH_DESKTOP_PORT")
             .ok()
@@ -912,23 +935,11 @@ impl ServerManager {
         }
     }
 
-    /// 仅当服务由本应用启动时才停止（复用中的服务不杀）。
-    pub fn stop(&self) {
-        if self.owned.load(Ordering::SeqCst) {
-            self.stop_owned();
-        }
-    }
-
     fn stop_owned(&self) {
         if let Some(child) = self.child.lock().unwrap().take() {
             kill_group(&child);
         }
         self.owned.store(false, Ordering::SeqCst);
-    }
-
-    pub fn restart(&self) {
-        self.stop();
-        self.start();
     }
 
     pub fn status(&self) -> StatusSnapshot {
