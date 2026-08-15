@@ -18,7 +18,9 @@ window.__ModuleLoader__.load({
     var inject = ['slots']
 
     // ---- 命令智能识别 ----
-    var COMMAND_WORDS = new Set(('cd ls pwd cat echo git npm node python python3 pip pip3 curl wget mkdir rm rmdir mv cp touch grep egrep fgrep find sed awk head tail less more sort uniq wc chmod chown sudo env export unset which whereis history ps top htop kill killall tar gzip gunzip zip unzip make cmake cargo go ruby php java javac docker docker-compose kubectl brew yarn pnpm npx sh bash zsh source install open defaults plutil xattr lsof df du date time sleep ping ssh scp rsync man tree watch jq yq xargs basename dirname realpath readlink ln dd file stat strings sqlite3 redis-cli mysql psql mongosh dsh gh rg fd bat tldr ffmpeg podman terraform ansible xcodebuild swift swiftc clang gcc cc').split(' '))
+    // 词表只放无歧义命令（shell 内建 + 常见工具）；歧义英文词（make/go/time/open/find 等）
+    // 交给可执行探测（≤2 词）判定，避免 "make it work" 这类误判。
+    var COMMAND_WORDS = new Set(('cd ls pwd cat echo git npm node python python3 pip pip3 curl wget mkdir rm rmdir mv cp touch grep egrep fgrep sed awk head tail uniq wc chmod chown sudo env export unset which whereis ps kill killall tar gzip gunzip zip unzip cmake cargo ruby php java javac docker docker-compose kubectl brew yarn pnpm npx sh bash zsh source defaults plutil xattr lsof df du ping ssh scp rsync man tree jq yq xargs basename dirname realpath readlink ln dd stat strings sqlite3 redis-cli mysql psql mongosh dsh gh rg fd bat tldr ffmpeg podman terraform ansible xcodebuild swift swiftc clang gcc cc').split(' '))
     var hasCJK = function (t) { return /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(t) }
     var hasShellOp = function (t) { return /[|&;<>*]/.test(t) }
     var stripPrefix = function (t) {
