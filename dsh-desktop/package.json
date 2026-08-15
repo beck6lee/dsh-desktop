@@ -1,0 +1,15 @@
+{
+  "name": "dsh-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "icons:source": "node scripts/make-icon-source.mjs",
+    "icons": "npm run icons:source && tauri icon icons/icon-source.png",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.5.0",
+    "sharp": "^0.34.1"
+  }
+}

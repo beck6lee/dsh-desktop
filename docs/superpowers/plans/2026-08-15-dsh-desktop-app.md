@@ -12,6 +12,7 @@
 - 首次 `cargo` 编译需下载编译大量 crate，约 5–15 分钟，务必用后台任务执行。
 - 当前 3080 端口正被本会话的 DSH 占用 → 应用会走「复用」路径；「自启自停」路径用 `DSH_DESKTOP_PORT=3999` 验收（见 Task 9），避免误杀正在运行的会话。
 - 所有 `cd` 均在 `dsh-desktop/` 下执行；git 在 `dsh-workspace/` 根目录。
+- ⚠️ 沙箱环境（必须）：文件沙箱禁止写 `~/.npm` 与 `~/.cargo`。所有 npm/npx 命令加 `export npm_config_cache=/tmp/dsh-npm-cache`；所有 cargo 命令用 `export CARGO_HOME=/tmp/dsh-cargo-home`（首次运行前 `mkdir -p /tmp/dsh-cargo-home`）。**不要**复制 `~/.cargo/config.toml`（tuna 镜像与 Cargo.lock 可能不同步导致解析失败；已实测直连 crates.io 可用且与 lock 一致）。
 
 ---
 
@@ -66,8 +67,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const src = path.resolve(here, '../assets/whale-girl/whale-girl-transparent.png');
-const outDir = path.resolve(here, 'icons');
+const src = path.resolve(here, '../../assets/whale-girl/whale-girl-transparent.png');
+const outDir = path.resolve(here, '../icons');
 await mkdir(outDir, { recursive: true });
 await sharp(src)
   .resize(1024, 1024, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
@@ -100,8 +101,12 @@ Expected: 输出 `icon source written: .../dsh-desktop/icons/icon-source.png`
 
 - [ ] **Step 2: 生成全套图标**
 
-Run: `cd /Users/beck.lee/Desktop/dsh-workspace/dsh-desktop && npx tauri icon icons/icon-source.png`
+Run: `cd /Users/beck.lee/Desktop/dsh-workspace/dsh-desktop && npx tauri icon icons/icon-source.png --output src-tauri/icons`
 Expected: `src-tauri/icons/` 出现 `icon.icns`、`icon.png`、`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.ico` 等文件（`ls src-tauri/icons/` 确认）。
+
+> ⚠️ 注意：必须带 `--output src-tauri/icons`。不带时 tauri-cli（≥2.11）会因 `tauri.conf.json` 尚不存在（Task 3 才创建）而 panic（"Couldn't recognize the current folder as a Tauri project"）。Task 3 之后 `npm run icons`（不带 --output）即可正常工作，产物落点一致。
+>
+> ℹ️ 再生成提示：`tauri icon` 每次生成的 `icon.icns` 容器字节序可能不同（chunk 内容一致，HashMap 迭代顺序导致），macOS 忽略顺序不影响使用；若重跑 `npm run icons` 后 git 显示 `icon.icns` 变动属正常现象。
 
 - [ ] **Step 3: 提交**
 
@@ -132,6 +137,10 @@ name = "dsh-desktop"
 version = "0.1.0"
 description = "DeepSeek Harness 桌面应用（Tauri v2）"
 edition = "2021"
+
+[lib]
+name = "dsh_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -252,7 +261,7 @@ pub fn run() {
             let handle = app.handle().clone();
             if let Some(win) = app.get_webview_window("main") {
                 win.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { .. } = event.event() {
+                    if let WindowEvent::CloseRequested { .. } = event {
                         handle.exit(0);
                     }
                 });
@@ -262,8 +271,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")
         .run(|app_handle, event| {
-            if let RunEvent::ExitRequested { .. } = event {
-                app_handle.state::<AppState>().server.stop();
+            // macOS Cmd+Q 只发 RunEvent::Exit（tao LoopDestroyed），不发 ExitRequested；
+            // 必须同时处理两者，否则退出清理不执行（Task 9 验收发现的真实 bug）。
+            // stop() 幂等，双触发无害。
+            match event {
+                RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                    app_handle.state::<AppState>().server.stop();
+                }
+                _ => {}
             }
         });
 }
@@ -764,19 +779,37 @@ git commit -m "feat: dsh 命令解析（env > PATH > npx 缓存，含单元测�
 
 ```rust
     #[test]
-    fn kill_group_terminates_spawned_process() {
-        let mut child = Command::new("/bin/sleep")
-            .arg("60")
+    fn kill_group_terminates_process_group() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 60 & echo $!; wait")
             .process_group(0)
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        // 读取后台孙进程 pid：读到换行即停（2s 上限），避免等 stdout EOF 阻塞 60s
+        let mut out = String::new();
+        let mut buf = [0u8; 16];
+        let mut stdout = child.stdout.take().unwrap();
+        let read_deadline = Instant::now() + Duration::from_secs(2);
+        while !out.contains('\n') && Instant::now() < read_deadline {
+            let n = stdout.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            out.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        let grandchild: i32 = out.trim().parse().unwrap();
         std::thread::sleep(Duration::from_millis(200));
         kill_group(&child);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && process_alive(child.id() as i32) {
+        while Instant::now() < deadline
+            && (process_alive(child.id() as i32) || process_alive(grandchild))
+        {
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(!process_alive(child.id() as i32));
+        assert!(!process_alive(child.id() as i32), "直接子进程应被杀死");
+        assert!(!process_alive(grandchild), "进程组内的孙进程应被杀死");
         let _ = child.kill();
     }
 ```
@@ -809,6 +842,13 @@ pub fn spawn_server(cmd: &ResolvedCommand, port: u16) -> std::io::Result<Child> 
 }
 
 fn process_alive(pid: i32) -> bool {
+    // 僵尸进程对 kill(pid, 0) 仍返回 0，无法据此区分；
+    // 先以 WNOHANG 收割：返回 pid 说明已退出（僵尸被收割），视为不存活。
+    let mut status: libc::c_int = 0;
+    let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if reaped == pid {
+        return false;
+    }
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
@@ -833,28 +873,55 @@ pub fn kill_group(child: &Child) {
 // ---------- 管理器 ----------
 
 pub struct ServerManager {
+    /// 串行化 start/stop/restart，避免退出与重启竞态（Task 3 质量审查要求）。
+    lifecycle: Mutex<()>,
+    /// 退出中止标志：stop() 置位后，in-flight 的 start 轮询会快速返回，退出不被阻塞。
+    stop_requested: AtomicBool,
     child: Mutex<Option<Child>>,
     owned: AtomicBool,
-    port: Mutex<u16>,
     state: Mutex<ServerState>,
 }
 
 impl ServerManager {
     pub fn new() -> Self {
         Self {
+            lifecycle: Mutex::new(()),
+            stop_requested: AtomicBool::new(false),
             child: Mutex::new(None),
             owned: AtomicBool::new(false),
-            port: Mutex::new(0),
             state: Mutex::new(ServerState::Starting),
         }
     }
 
     /// 阻塞式启动：复用检测 → 选端口 → spawn → 轮询就绪。由调用方放入线程。
     pub fn start(&self) {
+        self.stop_requested.store(false, Ordering::SeqCst);
+        let _guard = self.lifecycle.lock().unwrap();
+        self.start_inner();
+    }
+
+    /// 仅当服务由本应用启动时才停止（复用中的服务不杀）。
+    pub fn stop(&self) {
+        self.stop_requested.store(true, Ordering::SeqCst);
+        let _guard = self.lifecycle.lock().unwrap();
+        if self.owned.load(Ordering::SeqCst) {
+            self.stop_owned();
+        }
+    }
+
+    pub fn restart(&self) {
+        self.stop_requested.store(false, Ordering::SeqCst);
+        let _guard = self.lifecycle.lock().unwrap();
+        self.stop_owned();
+        self.start_inner();
+    }
+
+    fn start_inner(&self) {
         *self.state.lock().unwrap() = ServerState::Starting;
         let default_port: u16 = std::env::var("DSH_DESKTOP_PORT")
             .ok()
             .and_then(|s| s.parse().ok())
+            .filter(|&p| p > 0)
             .unwrap_or(DEFAULT_PORT);
         if is_dsh_running(default_port) {
             *self.state.lock().unwrap() = ServerState::Reused { port: default_port };
@@ -864,13 +931,18 @@ impl ServerManager {
             *self.state.lock().unwrap() = ServerState::Error("没有可用端口".to_string());
             return;
         };
+        // 先绑定到局部变量，避免 ResolveParams 借用临时值（E0716，Task 5 审查发现）
+        let dsh_env = std::env::var("DSH_DESKTOP_DSH").ok();
+        let node_env = std::env::var("DSH_DESKTOP_NODE").ok();
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        let node_candidates = vec![PathBuf::from("/opt/homebrew/bin/node")];
         let npx_root = Path::new(&std::env::var("HOME").unwrap_or_default())
             .join(".npm/_npx");
         let params = ResolveParams {
-            dsh_env: std::env::var("DSH_DESKTOP_DSH").ok().as_deref(),
-            node_env: std::env::var("DSH_DESKTOP_NODE").ok().as_deref(),
-            path_var: std::env::var("PATH").unwrap_or_default().as_str(),
-            node_candidates: &[PathBuf::from("/opt/homebrew/bin/node")],
+            dsh_env: dsh_env.as_deref(),
+            node_env: node_env.as_deref(),
+            path_var: &path_var,
+            node_candidates: &node_candidates,
             npx_root: &npx_root,
         };
         let Some(cmd) = resolve_command(&params) else {
@@ -885,13 +957,32 @@ impl ServerManager {
                 return;
             }
         };
-        *self.port.lock().unwrap() = port;
         self.owned.store(true, Ordering::SeqCst);
         *self.child.lock().unwrap() = Some(child);
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
+            if self.stop_requested.load(Ordering::SeqCst) {
+                // 中止前清理已 spawn 的子进程，避免孤儿（复审跟进）
+                self.stop_owned();
+                return;
+            }
             if is_dsh_running(port) {
                 *self.state.lock().unwrap() = ServerState::Ready { port };
+                return;
+            }
+            // 子进程提前退出 → 快速失败，报出真实原因（避免白等 30s）。
+            // 注意：结果绑定到 owned 局部变量，guard 在语句结束即释放，
+            // stop_owned 不得在持有 child 锁时调用（否则非重入 Mutex 死锁）。
+            let exited = self
+                .child
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|c| c.try_wait().ok().flatten());
+            if let Some(status) = exited {
+                self.stop_owned();
+                *self.state.lock().unwrap() =
+                    ServerState::Error(format!("dsh 进程提前退出: {status}"));
                 return;
             }
             if Instant::now() >= deadline {
@@ -904,23 +995,11 @@ impl ServerManager {
         }
     }
 
-    /// 仅当服务由本应用启动时才停止（复用中的服务不杀）。
-    pub fn stop(&self) {
-        if self.owned.load(Ordering::SeqCst) {
-            self.stop_owned();
-        }
-    }
-
     fn stop_owned(&self) {
         if let Some(child) = self.child.lock().unwrap().take() {
             kill_group(&child);
         }
         self.owned.store(false, Ordering::SeqCst);
-    }
-
-    pub fn restart(&self) {
-        self.stop();
-        self.start();
     }
 
     pub fn status(&self) -> StatusSnapshot {
