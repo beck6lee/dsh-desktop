@@ -30,15 +30,17 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // 提前创建状态并启动 dsh 服务：与窗口/WebView 初始化并行，缩短可感知启动时间
+    let state = AppState {
+        server: Arc::new(server::ServerManager::new()),
+    };
+    let early = state.server.clone();
+    std::thread::spawn(move || early.start());
+
     tauri::Builder::default()
-        .manage(AppState {
-            server: Arc::new(server::ServerManager::new()),
-        })
+        .manage(state)
         .invoke_handler(tauri::generate_handler![server_status, restart_server])
         .setup(|app| {
-            let mgr = app.state::<AppState>().server.clone();
-            std::thread::spawn(move || mgr.start());
-
             // 窗口关闭改为隐藏到托盘（不再退出）
             let main_win = app
                 .get_webview_window("main")

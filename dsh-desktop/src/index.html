@@ -4,67 +4,55 @@
 <meta charset="utf-8" />
 <title>DeepSeek Harness</title>
 <style>
-  :root { --ok:#22c55e; --warn:#f59e0b; --err:#ef4444; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; }
-  body { display: flex; flex-direction: column; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0b1220; color: #e2e8f0; }
-  #statusbar { display: flex; align-items: center; gap: 10px; padding: 6px 14px; background: #111a2e; border-bottom: 1px solid #1e293b; font-size: 13px; user-select: none; }
-  #dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); }
-  #dot.starting { background: var(--warn); animation: pulse 1.2s infinite; }
-  #dot.ready, #dot.reused { background: var(--ok); }
-  #dot.error { background: var(--err); }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
-  #status-text { flex: 1; }
-  #restart { display: none; padding: 3px 12px; border-radius: 6px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; font-size: 12px; }
-  #restart:hover { background: #334155; }
-  #restart.show { display: inline-block; }
-  #frame { flex: 1; width: 100%; border: 0; background: #fff; }
+  html, body { height: 100%; overflow: hidden; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0b1220; color: #e2e8f0; }
+  #frame { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+  /* 启动遮罩：服务就绪后淡出，不常驻；异常时显示错误 + 重启 */
+  #boot { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #0b1220; opacity: 1; transition: opacity .25s ease; }
+  #boot.hidden { opacity: 0; pointer-events: none; }
+  .spinner { width: 26px; height: 26px; border: 3px solid #1e293b; border-top-color: #3b82f6; border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #boot-text { font-size: 13px; color: #94a3b8; }
+  #boot-restart { display: none; padding: 6px 16px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; font-size: 13px; }
+  #boot-restart:hover { background: #334155; }
 </style>
 </head>
 <body>
-  <div id="statusbar">
-    <span id="dot" class="starting"></span>
-    <span id="status-text">正在启动 DSH 服务…</span>
-    <button id="restart">重启服务</button>
-  </div>
   <iframe id="frame" src="about:blank" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+  <div id="boot">
+    <div class="spinner"></div>
+    <div id="boot-text">正在启动 DSH…</div>
+    <button id="boot-restart">重启服务</button>
+  </div>
   <script>
     const tauri = window.__TAURI__;
     const $ = (id) => document.getElementById(id);
     const frame = $('frame');
+    const boot = $('boot');
     let currentPort = null;
+    let fast = true; // 就绪前快速轮询（250ms），就绪后 2s
 
     function render(snapshot) {
-      const dot = $('dot');
-      const text = $('status-text');
-      const restart = $('restart');
-      dot.className = '';
       const st = snapshot.state;
-      if (st === 'starting') {
-        dot.classList.add('starting');
-        text.textContent = '正在启动 DSH 服务…';
-        restart.classList.remove('show');
-      } else if (st === 'ready') {
-        dot.classList.add('ready');
-        text.textContent = '已就绪 · 端口 ' + snapshot.port;
-        restart.classList.remove('show');
-      } else if (st === 'reused') {
-        dot.classList.add('reused');
-        text.textContent = '复用已有服务 · 端口 ' + snapshot.port;
-        restart.classList.remove('show');
+      const restart = $('boot-restart');
+      if (st === 'ready' || st === 'reused') {
+        fast = false;
+        boot.classList.add('hidden');
+        if (snapshot.port && snapshot.port !== currentPort) {
+          currentPort = snapshot.port;
+          frame.src = 'http://127.0.0.1:' + snapshot.port;
+        }
+      } else if (st === 'error') {
+        fast = true;
+        boot.classList.remove('hidden');
+        $('boot-text').textContent = '服务异常：' + (snapshot.error || '未知错误');
+        restart.style.display = 'inline-block';
       } else {
-        dot.classList.add('error');
-        text.textContent = '服务异常：' + (snapshot.error || '未知错误');
-        restart.disabled = false;
-        restart.classList.add('show');
-      }
-      const available = (st === 'ready' || st === 'reused');
-      if (!available) {
-        currentPort = null;
-        frame.src = 'about:blank';
-      } else if (snapshot.port && snapshot.port !== currentPort) {
-        currentPort = snapshot.port;
-        frame.src = 'http://127.0.0.1:' + snapshot.port;
+        fast = true;
+        boot.classList.remove('hidden');
+        $('boot-text').textContent = '正在启动 DSH…';
+        restart.style.display = 'none';
       }
     }
 
@@ -72,20 +60,20 @@
       try {
         render(await tauri.core.invoke('server_status'));
       } catch (e) {
-        $('status-text').textContent = '状态查询失败：' + e;
+        // 查询失败保持当前遮罩
       }
-      setTimeout(poll, 2000);
+      setTimeout(poll, fast ? 250 : 2000);
     }
 
-    $('restart').addEventListener('click', async () => {
-      $('restart').disabled = true;
-      $('restart').classList.remove('show');
+    $('boot-restart').addEventListener('click', async () => {
+      $('boot-restart').style.display = 'none';
+      $('boot-text').textContent = '正在启动 DSH…';
       try { await tauri.core.invoke('restart_server'); } catch (e) { console.error(e); }
     });
 
     if (!tauri) {
       frame.src = 'http://127.0.0.1:3080';
-      $('status-text').textContent = '浏览器预览模式（非桌面运行时）';
+      boot.style.display = 'none';
     } else {
       poll();
     }
