@@ -66,8 +66,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const src = path.resolve(here, '../assets/whale-girl/whale-girl-transparent.png');
-const outDir = path.resolve(here, 'icons');
+const src = path.resolve(here, '../../assets/whale-girl/whale-girl-transparent.png');
+const outDir = path.resolve(here, '../icons');
 await mkdir(outDir, { recursive: true });
 await sharp(src)
   .resize(1024, 1024, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
