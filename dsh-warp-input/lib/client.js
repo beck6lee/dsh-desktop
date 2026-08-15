@@ -1,10 +1,12 @@
 /**
- * dsh-warp-input client half
+ * dsh-warp-input client half (v2)
  *
  * 接管 conversation.composer（chain 槽）：
- *  - 输入以 `$` 开头 → 命令模式：POST /warp/run 在会话目录执行，内联显示输出
- *  - 否则 → 正常对话（inputActions.submit()，斜杠命令等原有行为保留）
- *  - hero 阶段（无会话）或存在待处理交互（问题/审批）时让位
+ *  - 智能识别命令 vs 对话（无需 $ 前缀）：常见命令词表 / shell 操作符 / CJK 判定 /
+ *    未知词可执行探测（POST /warp/check）；$ 或反引号仍可强制命令；徽标可点击手动切换。
+ *  - 命令 → 提交 `/run <cmd>`（注册的命令在会话目录执行，结果作为节点进入对话流）。
+ *  - 对话 → inputActions.submit()（斜杠命令等原有行为保留）。
+ *  - 命令模式下 ↑/↓ 浏览历史。
  */
 window.__ModuleLoader__.load({
   id: 'dsh-warp-input',
@@ -15,7 +17,54 @@ window.__ModuleLoader__.load({
 
     var inject = ['slots']
 
-    // 命令历史：按 sessionId 记忆（页面会话内跨重挂载存活），↑/↓ 在命令模式浏览
+    // ---- 命令智能识别 ----
+    var COMMAND_WORDS = new Set(('cd ls pwd cat echo git npm node python python3 pip pip3 curl wget mkdir rm rmdir mv cp touch grep egrep fgrep find sed awk head tail less more sort uniq wc chmod chown sudo env export unset which whereis history ps top htop kill killall tar gzip gunzip zip unzip make cmake cargo go ruby php java javac docker docker-compose kubectl brew yarn pnpm npx sh bash zsh source install open defaults plutil xattr lsof df du date time sleep ping ssh scp rsync man tree watch jq yq xargs basename dirname realpath readlink ln dd file stat strings sqlite3 redis-cli mysql psql mongosh dsh gh rg fd bat tldr ffmpeg podman terraform ansible xcodebuild swift swiftc clang gcc cc').split(' '))
+    var hasCJK = function (t) { return /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(t) }
+    var hasShellOp = function (t) { return /[|&;<>*]/.test(t) }
+    var stripPrefix = function (t) {
+      var s = t.trim()
+      if (s.charAt(0) === '$') return s.slice(1).trim()
+      if (s.charAt(0) === '`' && s.charAt(s.length - 1) === '`' && s.length > 2) return s.slice(1, -1).trim()
+      return s
+    }
+    var detectBase = function (draft) {
+      var t = draft.trim()
+      if (!t) return 'conversation'
+      if (t.charAt(0) === '$') return 'command'
+      if (t.charAt(0) === '`' && t.charAt(t.length - 1) === '`' && t.length > 2) return 'command'
+      if (hasCJK(t)) return 'conversation'
+      var first = t.split(/\s+/)[0].toLowerCase()
+      if (COMMAND_WORDS.has(first)) return 'command'
+      if (hasShellOp(t)) return 'command'
+      var c0 = first.charAt(0)
+      if ((c0 === '-' || c0 === '.' || c0 === '/') && t.split(/\s+/).length <= 2) return 'command'
+      return 'conversation'
+    }
+    var checkToken = function (token) {
+      return fetch('/warp/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token }),
+      })
+        .then(function (r) { return r.json() })
+        .then(function (res) { return !!(res && res.exists) })
+        .catch(function () { return false })
+    }
+    var resolveMode = function (draft) {
+      var base = detectBase(draft)
+      if (base === 'command') return Promise.resolve('command')
+      var t = draft.trim()
+      var tokens = t.split(/\s+/)
+      if (tokens.length >= 1 && tokens.length <= 2 && !hasCJK(t)) {
+        var first = tokens[0].replace(/[,.;:'"!?]$/, '').toLowerCase()
+        if (first && !COMMAND_WORDS.has(first) && !/^[./\-]/.test(first)) {
+          return checkToken(first).then(function (ok) { return ok ? 'command' : 'conversation' })
+        }
+      }
+      return Promise.resolve('conversation')
+    }
+
+    // ---- 命令历史 ----
     var HISTORY = Object.create(null)
     var HISTORY_CAP = 50
     function pushHistory(sessionId, cmd) {
@@ -34,51 +83,21 @@ window.__ModuleLoader__.load({
         '.warp-textarea { width:100%; min-height:48px; max-height:200px; resize:none; border:none; outline:none; background:transparent; color:var(--dsw-alias-label-primary); font:14px/20px var(--ds-font-family, -apple-system); }',
         '.warp-textarea:disabled { opacity:.6; }',
         '.warp-row { display:flex; align-items:center; gap:8px; }',
-        '.warp-badge { font:11px/16px var(--ds-font-family-code, monospace); color:var(--dsw-alias-state-business-primary); background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent); border-radius:6px; padding:1px 8px; }',
+        '.warp-badge { font:11px/16px var(--ds-font-family-code, monospace); color:var(--dsw-alias-state-business-primary); background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent); border-radius:6px; padding:1px 8px; cursor:pointer; }',
         '.warp-badge-chat { color:var(--dsw-alias-label-tertiary); background:var(--dsw-alias-bg-module-platform); }',
+        '.warp-badge-force { outline:1px dashed var(--dsw-alias-border-l3); }',
         '.warp-send { margin-left:auto; border:none; border-radius:10px; background:var(--dsw-alias-state-business-primary); color:#fff; font-size:13px; padding:6px 14px; cursor:pointer; }',
         '.warp-send:disabled { opacity:.5; cursor:default; }',
-        '.warp-out { display:flex; flex-direction:column; gap:6px; border-top:1px solid var(--dsw-alias-border-l1); padding-top:8px; max-height:240px; overflow:auto; }',
-        '.warp-cmd { color:var(--dsw-alias-label-secondary); font:12px/18px var(--ds-font-family-code, monospace); white-space:pre-wrap; }',
-        '.warp-pre { margin:0; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-layer-1); border-radius:8px; padding:8px 10px; font:12px/18px var(--ds-font-family-code, monospace); white-space:pre-wrap; word-break:break-all; }',
-        '.warp-pre-err { color:var(--dsw-alias-state-error-primary); }',
-        '.warp-pill { font:11px/16px var(--ds-font-family-code, monospace); border-radius:999px; padding:1px 8px; }',
-        '.warp-pill-ok { color:var(--dsw-alias-state-success-primary); background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent); }',
-        '.warp-pill-err { color:var(--dsw-alias-state-error-primary); background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent); }',
-        '.warp-pill-run { color:var(--dsw-alias-state-warn-label); background:color-mix(in srgb, var(--dsw-alias-state-warn-label) 14%, transparent); }',
         '.warp-hint { color:var(--dsw-alias-label-caption); font-size:11px; }',
       ].join('\n')
 
-      ctx.effect(() => {
+      ctx.effect(function () {
         var tag = document.createElement('style')
         tag.dataset.plugin = 'dsh-warp-input'
         tag.textContent = css
         document.head.appendChild(tag)
-        return () => tag.remove()
+        return function () { tag.remove() }
       })
-
-      function runCommand(draft, sessionId, setView) {
-        var cmd = draft.trim().slice(1).trim()
-        if (!cmd) return
-        pushHistory(sessionId, cmd)
-        setView({ running: true, result: null })
-        fetch('/warp/run', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId: sessionId, command: cmd, timeoutMs: 60000 }),
-        })
-          .then(function (r) { return r.json() })
-          .then(function (res) {
-            if (res && res.ok === true) {
-              setView({ running: false, result: { kind: 'result', cmd: cmd, res: res } })
-            } else {
-              setView({ running: false, result: { kind: 'error', cmd: cmd, error: (res && res.error) || '执行失败' } })
-            }
-          })
-          .catch(function (e) {
-            setView({ running: false, result: { kind: 'error', cmd: cmd, error: String((e && e.message) || e) } })
-          })
-      }
 
       function WarpComposer(props) {
         var useInput = props.useInput
@@ -86,39 +105,67 @@ window.__ModuleLoader__.load({
         var sessionId = props.sessionId
         var input = typeof useInput === 'function' ? useInput(function (s) { return s }) : undefined
         var draft = (input && input.draft) || ''
-        var isCommand = draft.trim().indexOf('$') === 0
-        var state = React.useState({ running: false, result: null })
-        var view = state[0]
-        var setView = state[1]
-        var running = view.running
-        var result = view.result
-        // 命令历史浏览：idx=-1 表示未在浏览；pending 保存浏览前的草稿
+        var forceState = React.useState(null)
+        var force = forceState[0]
+        var setForce = forceState[1]
+        var exeState = React.useState(false)
+        var exeCmd = exeState[0]
+        var setExeCmd = exeState[1]
         var idxState = React.useState(-1)
         var idx = idxState[0]
         var setIdx = idxState[1]
         var pendingState = React.useState('')
         var pending = pendingState[0]
         var setPending = pendingState[1]
-        var historyList = (HISTORY[sessionId] || [])
+        var historyList = HISTORY[sessionId] || []
 
-        function send() {
-          if (isCommand) {
-            runCommand(draft, sessionId, setView)
-            if (typeof inputActions.setDraft === 'function') inputActions.setDraft('')
-            if (idx !== -1) setIdx(-1)
-            if (pending) setPending('')
-          } else if (typeof inputActions.submit === 'function') {
-            inputActions.submit()
-          }
+        React.useEffect(function () {
+          var t = draft.trim()
+          var tokens = t.split(/\s+/)
+          var first = tokens[0] ? tokens[0].replace(/[,.;:'"!?]$/, '').toLowerCase() : ''
+          var ambiguous = t && detectBase(draft) === 'conversation' && tokens.length <= 2 && !hasCJK(t) && first && !COMMAND_WORDS.has(first) && !/^[./\-]/.test(first)
+          if (!ambiguous) { setExeCmd(false); return }
+          var dead = false
+          var timer = setTimeout(function () {
+            checkToken(first).then(function (ok) { if (!dead) setExeCmd(ok) })
+          }, 400)
+          return function () { dead = true; clearTimeout(timer) }
+        }, [draft])
+
+        var detected = detectBase(draft)
+        var effective = force || (detected === 'conversation' && exeCmd ? 'command' : detected)
+        var isCommand = effective === 'command'
+
+        var toggleForce = function () { setForce(isCommand ? 'conversation' : 'command') }
+
+        var submitCommand = function (draft) {
+          var cmd = stripPrefix(draft)
+          if (!cmd) return
+          pushHistory(sessionId, cmd)
+          if (typeof inputActions.setDraft === 'function') inputActions.setDraft('/run ' + cmd)
+          if (typeof inputActions.submit === 'function') inputActions.submit()
+          if (idx !== -1) setIdx(-1)
+          if (pending) setPending('')
         }
 
-        function onKeyDown(e) {
+        var send = function () {
+          if (force) {
+            if (force === 'command') submitCommand(draft)
+            else if (typeof inputActions.submit === 'function') inputActions.submit()
+            return
+          }
+          resolveMode(draft).then(function (mode) {
+            if (mode === 'command') submitCommand(draft)
+            else if (typeof inputActions.submit === 'function') inputActions.submit()
+          })
+        }
+
+        var onKeyDown = function (e) {
           if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault()
             send()
             return
           }
-          // 命令模式下 ↑/↓ 浏览历史；非命令模式保留 textarea 默认行为
           if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && isCommand && !e.nativeEvent.isComposing) {
             if (historyList.length === 0) return
             e.preventDefault()
@@ -126,7 +173,7 @@ window.__ModuleLoader__.load({
               if (idx === -1) setPending(draft)
               var up = idx === -1 ? historyList.length - 1 : Math.max(0, idx - 1)
               setIdx(up)
-              if (typeof inputActions.setDraft === 'function') inputActions.setDraft('$ ' + historyList[up])
+              if (typeof inputActions.setDraft === 'function') inputActions.setDraft(historyList[up])
             } else {
               if (idx === -1) return
               var down = idx + 1
@@ -135,65 +182,36 @@ window.__ModuleLoader__.load({
                 if (typeof inputActions.setDraft === 'function') inputActions.setDraft(pending)
               } else {
                 setIdx(down)
-                if (typeof inputActions.setDraft === 'function') inputActions.setDraft('$ ' + historyList[down])
+                if (typeof inputActions.setDraft === 'function') inputActions.setDraft(historyList[down])
               }
             }
           }
-        }
-
-        function renderResult() {
-          if (!result) return null
-          var children = [
-            React.createElement('span', { className: 'warp-cmd', key: 'cmd' }, '$ ' + result.cmd),
-          ]
-          if (result.kind === 'error') {
-            children.push(React.createElement('pre', { className: 'warp-pre warp-pre-err', key: 'err' }, result.error))
-            return React.createElement('div', { className: 'warp-out', key: 'out' }, children)
-          }
-          var res = result.res
-          if (res.stdout) children.push(React.createElement('pre', { className: 'warp-pre', key: 'out' }, res.stdout))
-          if (res.stderr) children.push(React.createElement('pre', { className: 'warp-pre warp-pre-err', key: 'err' }, res.stderr))
-          var pill = res.timedOut
-            ? { cls: 'warp-pill-run', text: 'TIMEOUT' }
-            : res.exitCode === 0
-              ? { cls: 'warp-pill-ok', text: 'exit 0' }
-              : { cls: 'warp-pill-err', text: 'exit ' + String(res.exitCode) }
-          children.push(React.createElement('span', { className: 'warp-pill ' + pill.cls, key: 'pill' }, pill.text))
-          if (res.stdoutTruncated || res.stderrTruncated) {
-            children.push(React.createElement('span', { className: 'warp-hint', key: 'trunc' }, '（输出过长已截断）'))
-          }
-          return React.createElement('div', { className: 'warp-out', key: 'out' }, children)
         }
 
         return React.createElement('div', { className: 'warp-composer' },
           React.createElement('textarea', {
             className: 'warp-textarea',
             value: draft,
-            placeholder: isCommand ? '在会话目录执行命令…' : '对话消息；以 $ 开头为命令（如 $ ls -la）',
+            placeholder: '对话或命令（智能识别，如 ls -la；点击左侧徽标可手动切换）',
             onChange: function (e) {
-              // 手动编辑时退出历史浏览
-              if (idx !== -1) {
-                setIdx(-1)
-                setPending('')
-              }
+              if (force) setForce(null)
+              if (idx !== -1) { setIdx(-1); setPending('') }
               if (typeof inputActions.setDraft === 'function') inputActions.setDraft(e.target.value)
             },
             onKeyDown: onKeyDown,
-            disabled: running,
           }),
           React.createElement('div', { className: 'warp-row' },
-            React.createElement('span', { className: isCommand ? 'warp-badge' : 'warp-badge warp-badge-chat' },
-              isCommand ? '$ 命令' : '对话'),
+            React.createElement('button', {
+              className: 'warp-badge' + (isCommand ? '' : ' warp-badge-chat') + (force ? ' warp-badge-force' : ''),
+              onClick: toggleForce,
+              title: '点击切换命令/对话（虚线=手动模式）',
+            }, isCommand ? '$ 命令' : '对话'),
             (isCommand && historyList.length > 0)
               ? React.createElement('span', { className: 'warp-hint' }, '↑/↓ 历史')
               : null,
-            running
-              ? React.createElement('span', { className: 'warp-pill warp-pill-run' }, '运行中…')
-              : null,
-            React.createElement('button', { className: 'warp-send', onClick: send, disabled: running },
+            React.createElement('button', { className: 'warp-send', onClick: send },
               isCommand ? '执行' : '发送'),
           ),
-          renderResult(),
         )
       }
 
