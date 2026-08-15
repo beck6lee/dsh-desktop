@@ -150,7 +150,57 @@ pub fn resolve_command(p: &ResolveParams) -> Option<ResolvedCommand> {
     Some(ResolvedCommand::NodeScript { node, script })
 }
 
+// ---------- 进程管理 ----------
+
+pub fn spawn_server(cmd: &ResolvedCommand, port: u16) -> std::io::Result<Child> {
+    let mut c = match cmd {
+        ResolvedCommand::PathDsh { command } => Command::new(command),
+        ResolvedCommand::NodeScript { node, script } => {
+            let mut c = Command::new(node);
+            c.arg(script);
+            c
+        }
+    };
+    c.args(["web", "--port", &port.to_string()]);
+    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    c.process_group(0);
+    c.spawn()
+}
+
+fn process_alive(pid: i32) -> bool {
+    // 僵尸进程对 kill(pid, 0) 仍返回 0，无法据此区分；
+    // 先以 WNOHANG 收割：返回 pid 说明已退出（僵尸被收割），视为不存活。
+    let mut status: libc::c_int = 0;
+    let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if reaped == pid {
+        return false;
+    }
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// 终止整个进程组：先 SIGTERM，2 秒后仍未退出则 SIGKILL。
+pub fn kill_group(child: &Child) {
+    let pid = child.id() as i32;
+    unsafe {
+        libc::kill(-pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if !process_alive(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+}
+
+// ---------- 管理器 ----------
+
 pub struct ServerManager {
+    /// 串行化 start/stop/restart，避免退出与重启竞态（Task 3 质量审查要求）。
+    lifecycle: Mutex<()>,
     child: Mutex<Option<Child>>,
     owned: AtomicBool,
     port: Mutex<u16>,
@@ -160,17 +210,115 @@ pub struct ServerManager {
 impl ServerManager {
     pub fn new() -> Self {
         Self {
+            lifecycle: Mutex::new(()),
             child: Mutex::new(None),
             owned: AtomicBool::new(false),
             port: Mutex::new(0),
             state: Mutex::new(ServerState::Starting),
         }
     }
-    pub fn start(&self) {}
-    pub fn stop(&self) {}
-    pub fn restart(&self) {}
+
+    /// 阻塞式启动：复用检测 → 选端口 → spawn → 轮询就绪。由调用方放入线程。
+    pub fn start(&self) {
+        let _guard = self.lifecycle.lock().unwrap();
+        self.start_inner();
+    }
+
+    /// 仅当服务由本应用启动时才停止（复用中的服务不杀）。
+    pub fn stop(&self) {
+        let _guard = self.lifecycle.lock().unwrap();
+        if self.owned.load(Ordering::SeqCst) {
+            self.stop_owned();
+        }
+    }
+
+    pub fn restart(&self) {
+        let _guard = self.lifecycle.lock().unwrap();
+        self.stop_owned();
+        self.start_inner();
+    }
+
+    fn start_inner(&self) {
+        *self.state.lock().unwrap() = ServerState::Starting;
+        let default_port: u16 = std::env::var("DSH_DESKTOP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_PORT);
+        if is_dsh_running(default_port) {
+            *self.state.lock().unwrap() = ServerState::Reused { port: default_port };
+            return;
+        }
+        let Some(port) = find_free_port(default_port) else {
+            *self.state.lock().unwrap() = ServerState::Error("没有可用端口".to_string());
+            return;
+        };
+        // 先绑定到局部变量，避免 ResolveParams 借用临时值（E0716）
+        let dsh_env = std::env::var("DSH_DESKTOP_DSH").ok();
+        let node_env = std::env::var("DSH_DESKTOP_NODE").ok();
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        let node_candidates = vec![PathBuf::from("/opt/homebrew/bin/node")];
+        let npx_root = Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join(".npm/_npx");
+        let params = ResolveParams {
+            dsh_env: dsh_env.as_deref(),
+            node_env: node_env.as_deref(),
+            path_var: &path_var,
+            node_candidates: &node_candidates,
+            npx_root: &npx_root,
+        };
+        let Some(cmd) = resolve_command(&params) else {
+            *self.state.lock().unwrap() =
+                ServerState::Error("找不到 node/dsh，请设置 DSH_DESKTOP_DSH".to_string());
+            return;
+        };
+        let child = match spawn_server(&cmd, port) {
+            Ok(c) => c,
+            Err(e) => {
+                *self.state.lock().unwrap() = ServerState::Error(format!("启动失败: {e}"));
+                return;
+            }
+        };
+        *self.port.lock().unwrap() = port;
+        self.owned.store(true, Ordering::SeqCst);
+        *self.child.lock().unwrap() = Some(child);
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            if is_dsh_running(port) {
+                *self.state.lock().unwrap() = ServerState::Ready { port };
+                return;
+            }
+            if Instant::now() >= deadline {
+                self.stop_owned();
+                *self.state.lock().unwrap() =
+                    ServerState::Error(format!("端口 {port} 等待超时"));
+                return;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    fn stop_owned(&self) {
+        if let Some(child) = self.child.lock().unwrap().take() {
+            kill_group(&child);
+        }
+        self.owned.store(false, Ordering::SeqCst);
+    }
+
     pub fn status(&self) -> StatusSnapshot {
-        StatusSnapshot { state: "starting".to_string(), port: None, error: None, pid: None, owned: false }
+        let (state, port, error) = match &*self.state.lock().unwrap() {
+            ServerState::Starting => ("starting".to_string(), None, None),
+            ServerState::Ready { port } => ("ready".to_string(), Some(*port), None),
+            ServerState::Reused { port } => ("reused".to_string(), Some(*port), None),
+            ServerState::Error(e) => ("error".to_string(), None, Some(e.clone())),
+        };
+        let pid = self.child.lock().unwrap().as_ref().map(|c| c.id());
+        StatusSnapshot {
+            state,
+            port,
+            error,
+            pid,
+            owned: self.owned.load(Ordering::SeqCst),
+        }
     }
 }
 
@@ -319,5 +467,22 @@ mod tests {
             })
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kill_group_terminates_spawned_process() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        kill_group(&child);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && process_alive(child.id() as i32) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!process_alive(child.id() as i32));
+        let _ = child.kill();
     }
 }
