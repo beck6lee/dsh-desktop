@@ -137,6 +137,10 @@ version = "0.1.0"
 description = "DeepSeek Harness 桌面应用（Tauri v2）"
 edition = "2021"
 
+[lib]
+name = "dsh_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -256,7 +260,7 @@ pub fn run() {
             let handle = app.handle().clone();
             if let Some(win) = app.get_webview_window("main") {
                 win.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { .. } = event.event() {
+                    if let WindowEvent::CloseRequested { .. } = event {
                         handle.exit(0);
                     }
                 });
