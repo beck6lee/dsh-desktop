@@ -32,12 +32,14 @@ window.__ModuleLoader__.load({
     var detectBase = function (draft) {
       var t = draft.trim()
       if (!t) return 'conversation'
-      if (t.charAt(0) === '$') return 'command'
-      if (t.charAt(0) === '`' && t.charAt(t.length - 1) === '`' && t.length > 2) return 'command'
+      // 多行：用首行做词表/前缀判定，操作符看全文
+      var firstLine = t.split('\n')[0].trim()
+      if (firstLine.charAt(0) === '$') return 'command'
+      if (firstLine.charAt(0) === '`' && firstLine.charAt(firstLine.length - 1) === '`' && firstLine.length > 2) return 'command'
       // 斜杠行（/run xxx、/plan xxx 等）：交给机器内建斜杠裁决，绝不包 /run
-      if (t.charAt(0) === '/') return 'conversation'
+      if (firstLine.charAt(0) === '/') return 'conversation'
       if (hasCJK(t)) return 'conversation'
-      var first = t.split(/\s+/)[0].toLowerCase()
+      var first = firstLine.split(/\s+/)[0].toLowerCase()
       if (COMMAND_WORDS.has(first)) return 'command'
       if (hasShellOp(t)) return 'command'
       var c0 = first.charAt(0)
@@ -68,14 +70,24 @@ window.__ModuleLoader__.load({
       return Promise.resolve('conversation')
     }
 
-    // ---- 命令历史 ----
-    var HISTORY = Object.create(null)
+    // ---- 命令历史（localStorage 持久化，跨重启保留）----
+    var HISTORY = (function () {
+      try {
+        var raw = window.localStorage.getItem('dsh-warp-history')
+        if (raw) return JSON.parse(raw)
+      } catch (e) {}
+      return Object.create(null)
+    })()
     var HISTORY_CAP = 50
+    function saveHistory() {
+      try { window.localStorage.setItem('dsh-warp-history', JSON.stringify(HISTORY)) } catch (e) {}
+    }
     function pushHistory(sessionId, cmd) {
       var list = HISTORY[sessionId] || (HISTORY[sessionId] = [])
       if (list[list.length - 1] !== cmd) {
         list.push(cmd)
         if (list.length > HISTORY_CAP) list.splice(0, list.length - HISTORY_CAP)
+        saveHistory()
       }
     }
 
@@ -102,6 +114,9 @@ window.__ModuleLoader__.load({
         '.warp-cmdview-run { color:var(--dsw-alias-state-warn-label); background:color-mix(in srgb, var(--dsw-alias-state-warn-label) 14%, transparent); }',
         '.warp-cmdview-body { margin:0; color:var(--dsw-alias-label-primary); background:var(--dsw-alias-bg-layer-1); border-radius:8px; padding:8px 10px; font:12px/19px var(--ds-font-family-code, monospace); white-space:pre-wrap; word-break:break-all; max-height:360px; overflow:auto; }',
         '.warp-cmdview-errbody { color:var(--dsw-alias-state-error-primary); }',
+        '.warp-cmdview-actions { margin-left:auto; display:flex; gap:6px; flex:none; }',
+        '.warp-cmdview-btn { border:1px solid var(--dsw-alias-border-l2); background:var(--dsw-alias-bg-module-platform); color:var(--dsw-alias-label-secondary); border-radius:6px; font-size:11px; padding:1px 8px; cursor:pointer; }',
+        '.warp-cmdview-btn:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }',
       ].join('\n')
 
       ctx.effect(function () {
@@ -239,6 +254,13 @@ window.__ModuleLoader__.load({
         var args = (node && node.args ? String(node.args).trim() : '')
         var outcome = node ? node.outcome : null
         var head = '/run' + (args ? ' ' + args : '')
+        var text = outcome && outcome.text ? String(outcome.text) : ''
+        var expandState = React.useState(true)
+        var expanded = expandState[0]
+        var setExpanded = expandState[1]
+        var copiedState = React.useState(false)
+        var copied = copiedState[0]
+        var setCopied = copiedState[1]
         var pill
         if (!outcome) {
           pill = { cls: 'warp-cmdview-run', text: '执行中…' }
@@ -247,13 +269,42 @@ window.__ModuleLoader__.load({
         } else {
           pill = { cls: 'warp-cmdview-err', text: '失败' }
         }
-        var text = outcome && outcome.text ? String(outcome.text) : ''
+        var copyText = function () {
+          var ok = function () {
+            setCopied(true)
+            setTimeout(function () { setCopied(false) }, 1200)
+          }
+          var fallback = function (txt) {
+            var ta = document.createElement('textarea')
+            ta.value = txt
+            ta.style.position = 'fixed'
+            ta.style.opacity = '0'
+            document.body.appendChild(ta)
+            ta.select()
+            try { document.execCommand('copy') } catch (e) {}
+            document.body.removeChild(ta)
+          }
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(ok).catch(function () { fallback(text); ok() })
+          } else {
+            fallback(text)
+            ok()
+          }
+        }
         return React.createElement('div', { className: 'warp-cmdview' },
           React.createElement('div', { className: 'warp-cmdview-head' },
             React.createElement('span', { className: 'warp-cmdview-name', title: head }, head),
             React.createElement('span', { className: 'warp-cmdview-pill ' + pill.cls }, pill.text),
+            text
+              ? React.createElement('span', { className: 'warp-cmdview-actions' },
+                  React.createElement('button', { className: 'warp-cmdview-btn', onClick: copyText },
+                    copied ? '已复制' : '复制'),
+                  React.createElement('button', { className: 'warp-cmdview-btn', onClick: function () { setExpanded(!expanded) } },
+                    expanded ? '收起' : '展开'),
+                )
+              : null,
           ),
-          text
+          expanded && text
             ? React.createElement('pre', {
                 className: 'warp-cmdview-body' + (outcome && outcome.kind === 'error' ? ' warp-cmdview-errbody' : ''),
               }, text)
