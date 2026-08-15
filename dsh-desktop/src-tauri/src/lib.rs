@@ -1,11 +1,18 @@
 mod server;
 
 use std::sync::Arc;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 pub struct AppState {
     pub server: Arc<server::ServerManager>,
 }
+
+/// 持有托盘图标句柄，防止被 drop 后从系统托盘移除。
+/// 字段从不读取：纯靠 manage() 持有所有权保活，故 allow(dead_code)。
+#[allow(dead_code)]
+struct TrayHandle(tauri::tray::TrayIcon);
 
 #[tauri::command]
 fn server_status(state: tauri::State<'_, AppState>) -> server::StatusSnapshot {
@@ -19,6 +26,14 @@ fn restart_server(state: tauri::State<'_, AppState>) -> Result<String, String> {
     Ok("restarting".to_string())
 }
 
+/// 显示并聚焦主窗口（Dock 点击 / 托盘菜单共用）。
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
@@ -28,25 +43,61 @@ pub fn run() {
         .setup(|app| {
             let mgr = app.state::<AppState>().server.clone();
             std::thread::spawn(move || mgr.start());
-            let handle = app.handle().clone();
-            if let Some(win) = app.get_webview_window("main") {
-                win.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { .. } = event {
-                        handle.exit(0);
+
+            // 窗口关闭改为隐藏到托盘（不再退出）
+            let main_win = app
+                .get_webview_window("main")
+                .expect("main window should exist");
+            let close_win = main_win.clone();
+            main_win.on_window_event(move |event| {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = close_win.hide();
+                }
+            });
+
+            // 托盘菜单：显示/隐藏窗口、退出
+            let toggle = MenuItem::with_id(app, "toggle", "显示/隐藏窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&toggle, &quit])?;
+            let mut tray_builder = TrayIconBuilder::new()
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "toggle" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            if win.is_visible().unwrap_or(false) {
+                                let _ = win.hide();
+                            } else {
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                        }
                     }
+                    "quit" => app.exit(0),
+                    _ => {}
                 });
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
             }
+            let tray = tray_builder.build(app)?;
+            app.manage(TrayHandle(tray));
+
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")
         .run(|app_handle, event| {
-            // macOS Cmd+Q 只发 RunEvent::Exit（tao LoopDestroyed），不发 ExitRequested；
-            // 必须同时处理两者，否则退出清理不执行（Task 9 验收发现的真实 bug）。
-            // stop() 幂等，双触发无害。
             match event {
+                // macOS Cmd+Q 只发 RunEvent::Exit（tao LoopDestroyed），不发 ExitRequested；
+                // 必须同时处理两者，否则退出清理不执行（Task 9 验收发现的真实 bug）。
+                // stop() 幂等，双触发无害。
                 RunEvent::ExitRequested { .. } | RunEvent::Exit => {
                     app_handle.state::<AppState>().server.stop();
+                }
+                // Dock 图标点击（Reopen）：恢复窗口
+                RunEvent::Reopen { .. } => {
+                    show_main_window(app_handle);
                 }
                 _ => {}
             }
