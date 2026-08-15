@@ -773,19 +773,37 @@ git commit -m "feat: dsh 命令解析（env > PATH > npx 缓存，含单元测�
 
 ```rust
     #[test]
-    fn kill_group_terminates_spawned_process() {
-        let mut child = Command::new("/bin/sleep")
-            .arg("60")
+    fn kill_group_terminates_process_group() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 60 & echo $!; wait")
             .process_group(0)
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        // 读取后台孙进程 pid：读到换行即停（2s 上限），避免等 stdout EOF 阻塞 60s
+        let mut out = String::new();
+        let mut buf = [0u8; 16];
+        let mut stdout = child.stdout.take().unwrap();
+        let read_deadline = Instant::now() + Duration::from_secs(2);
+        while !out.contains('\n') && Instant::now() < read_deadline {
+            let n = stdout.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            out.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        let grandchild: i32 = out.trim().parse().unwrap();
         std::thread::sleep(Duration::from_millis(200));
         kill_group(&child);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && process_alive(child.id() as i32) {
+        while Instant::now() < deadline
+            && (process_alive(child.id() as i32) || process_alive(grandchild))
+        {
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(!process_alive(child.id() as i32));
+        assert!(!process_alive(child.id() as i32), "直接子进程应被杀死");
+        assert!(!process_alive(grandchild), "进程组内的孙进程应被杀死");
         let _ = child.kill();
     }
 ```
@@ -851,9 +869,10 @@ pub fn kill_group(child: &Child) {
 pub struct ServerManager {
     /// 串行化 start/stop/restart，避免退出与重启竞态（Task 3 质量审查要求）。
     lifecycle: Mutex<()>,
+    /// 退出中止标志：stop() 置位后，in-flight 的 start 轮询会快速返回，退出不被阻塞。
+    stop_requested: AtomicBool,
     child: Mutex<Option<Child>>,
     owned: AtomicBool,
-    port: Mutex<u16>,
     state: Mutex<ServerState>,
 }
 
@@ -861,21 +880,23 @@ impl ServerManager {
     pub fn new() -> Self {
         Self {
             lifecycle: Mutex::new(()),
+            stop_requested: AtomicBool::new(false),
             child: Mutex::new(None),
             owned: AtomicBool::new(false),
-            port: Mutex::new(0),
             state: Mutex::new(ServerState::Starting),
         }
     }
 
     /// 阻塞式启动：复用检测 → 选端口 → spawn → 轮询就绪。由调用方放入线程。
     pub fn start(&self) {
+        self.stop_requested.store(false, Ordering::SeqCst);
         let _guard = self.lifecycle.lock().unwrap();
         self.start_inner();
     }
 
     /// 仅当服务由本应用启动时才停止（复用中的服务不杀）。
     pub fn stop(&self) {
+        self.stop_requested.store(true, Ordering::SeqCst);
         let _guard = self.lifecycle.lock().unwrap();
         if self.owned.load(Ordering::SeqCst) {
             self.stop_owned();
@@ -883,6 +904,7 @@ impl ServerManager {
     }
 
     pub fn restart(&self) {
+        self.stop_requested.store(false, Ordering::SeqCst);
         let _guard = self.lifecycle.lock().unwrap();
         self.stop_owned();
         self.start_inner();
@@ -893,6 +915,7 @@ impl ServerManager {
         let default_port: u16 = std::env::var("DSH_DESKTOP_PORT")
             .ok()
             .and_then(|s| s.parse().ok())
+            .filter(|&p| p > 0)
             .unwrap_or(DEFAULT_PORT);
         if is_dsh_running(default_port) {
             *self.state.lock().unwrap() = ServerState::Reused { port: default_port };
@@ -928,14 +951,25 @@ impl ServerManager {
                 return;
             }
         };
-        *self.port.lock().unwrap() = port;
         self.owned.store(true, Ordering::SeqCst);
         *self.child.lock().unwrap() = Some(child);
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
+            if self.stop_requested.load(Ordering::SeqCst) {
+                return;
+            }
             if is_dsh_running(port) {
                 *self.state.lock().unwrap() = ServerState::Ready { port };
                 return;
+            }
+            // 子进程提前退出 → 快速失败，报出真实原因（避免白等 30s）
+            if let Some(child) = self.child.lock().unwrap().as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    self.stop_owned();
+                    *self.state.lock().unwrap() =
+                        ServerState::Error(format!("dsh 进程提前退出: {status}"));
+                    return;
+                }
             }
             if Instant::now() >= deadline {
                 self.stop_owned();
