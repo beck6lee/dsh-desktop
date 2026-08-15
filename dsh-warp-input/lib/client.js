@@ -82,10 +82,12 @@ window.__ModuleLoader__.load({
     function saveHistory() {
       try { window.localStorage.setItem('dsh-warp-history', JSON.stringify(HISTORY)) } catch (e) {}
     }
-    function pushHistory(sessionId, cmd) {
+    function pushHistory(sessionId, text, mode) {
       var list = HISTORY[sessionId] || (HISTORY[sessionId] = [])
-      if (list[list.length - 1] !== cmd) {
-        list.push(cmd)
+      var last = list[list.length - 1]
+      // 去重：连续相同文本+模式不重复记录
+      if (!last || last.text !== text || last.mode !== mode) {
+        list.push({ text: text, mode: mode })
         if (list.length > HISTORY_CAP) list.splice(0, list.length - HISTORY_CAP)
         saveHistory()
       }
@@ -145,6 +147,9 @@ window.__ModuleLoader__.load({
         var pendingState = React.useState('')
         var pending = pendingState[0]
         var setPending = pendingState[1]
+        var recallState = React.useState(false)
+        var recallFlag = recallState[0]
+        var setRecallFlag = recallState[1]
         var historyList = HISTORY[sessionId] || []
 
         React.useEffect(function () {
@@ -164,7 +169,10 @@ window.__ModuleLoader__.load({
         var effective = force || (detected === 'conversation' && exeCmd ? 'command' : detected)
         var isCommand = effective === 'command'
 
-        var toggleForce = function () { setForce(isCommand ? 'conversation' : 'command') }
+        var toggleForce = function () {
+          setForce(isCommand ? 'conversation' : 'command')
+          setRecallFlag(false)
+        }
 
         var submitCommand = function (draft) {
           var cmd = stripPrefix(draft)
@@ -174,7 +182,7 @@ window.__ModuleLoader__.load({
             if (typeof inputActions.submit === 'function') inputActions.submit()
             return
           }
-          pushHistory(sessionId, cmd)
+          pushHistory(sessionId, cmd, 'command')
           if (typeof inputActions.setDraft === 'function') inputActions.setDraft('/run ' + cmd)
           if (typeof inputActions.submit === 'function') inputActions.submit()
           if (idx !== -1) setIdx(-1)
@@ -184,12 +192,19 @@ window.__ModuleLoader__.load({
         var send = function () {
           if (force) {
             if (force === 'command') submitCommand(draft)
-            else if (typeof inputActions.submit === 'function') inputActions.submit()
+            else {
+              if (draft.trim()) pushHistory(sessionId, draft, 'conversation')
+              if (typeof inputActions.submit === 'function') inputActions.submit()
+            }
             return
           }
           resolveMode(draft).then(function (mode) {
-            if (mode === 'command') submitCommand(draft)
-            else if (typeof inputActions.submit === 'function') inputActions.submit()
+            if (mode === 'command') {
+              submitCommand(draft)
+            } else {
+              if (draft.trim()) pushHistory(sessionId, draft, 'conversation')
+              if (typeof inputActions.submit === 'function') inputActions.submit()
+            }
           })
         }
 
@@ -205,20 +220,27 @@ window.__ModuleLoader__.load({
             && (isCommand || draft.trim() === '')) {
             if (historyList.length === 0) return
             e.preventDefault()
+            var recall = function (entry) {
+              if (typeof inputActions.setDraft === 'function') inputActions.setDraft(entry.text)
+              setForce(entry.mode)
+              setRecallFlag(true)
+            }
             if (e.key === 'ArrowUp') {
               if (idx === -1) setPending(draft)
               var up = idx === -1 ? historyList.length - 1 : Math.max(0, idx - 1)
               setIdx(up)
-              if (typeof inputActions.setDraft === 'function') inputActions.setDraft(historyList[up])
+              recall(historyList[up])
             } else {
               if (idx === -1) return
               var down = idx + 1
               if (down >= historyList.length) {
                 setIdx(-1)
                 if (typeof inputActions.setDraft === 'function') inputActions.setDraft(pending)
+                setForce(null)
+                setRecallFlag(false)
               } else {
                 setIdx(down)
-                if (typeof inputActions.setDraft === 'function') inputActions.setDraft(historyList[down])
+                recall(historyList[down])
               }
             }
           }
@@ -231,6 +253,7 @@ window.__ModuleLoader__.load({
             placeholder: '对话或命令（智能识别，如 ls -la；点击左侧徽标可手动切换）',
             onChange: function (e) {
               if (force) setForce(null)
+              setRecallFlag(false)
               if (idx !== -1) { setIdx(-1); setPending('') }
               if (typeof inputActions.setDraft === 'function') inputActions.setDraft(e.target.value)
             },
@@ -238,7 +261,7 @@ window.__ModuleLoader__.load({
           }),
           React.createElement('div', { className: 'warp-row' },
             React.createElement('button', {
-              className: 'warp-badge' + (isCommand ? '' : ' warp-badge-chat') + (force ? ' warp-badge-force' : ''),
+              className: 'warp-badge' + (isCommand ? '' : ' warp-badge-chat') + (force && !recallFlag ? ' warp-badge-force' : ''),
               onClick: toggleForce,
               title: '点击切换命令/对话（虚线=手动模式）',
             }, isCommand ? '$ 命令' : '对话'),
