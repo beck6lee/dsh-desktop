@@ -9,11 +9,6 @@ pub struct AppState {
     pub server: Arc<server::ServerManager>,
 }
 
-/// 持有托盘图标句柄，防止被 drop 后从系统托盘移除。
-/// 字段从不读取：纯靠 manage() 持有所有权保活，故 allow(dead_code)。
-#[allow(dead_code)]
-struct TrayHandle(tauri::tray::TrayIcon);
-
 #[tauri::command]
 fn server_status(state: tauri::State<'_, AppState>) -> server::StatusSnapshot {
     state.server.status()
@@ -80,8 +75,9 @@ pub fn run() {
             if let Some(icon) = app.default_window_icon() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
-            let tray = tray_builder.build(app)?;
-            app.manage(TrayHandle(tray));
+            // build() 内部将托盘强引用存入 app resources table，句柄无需持有；
+            // 直接丢弃返回值不会移除系统托盘（tauri app.rs resources_table）。
+            tray_builder.build(app)?;
 
             Ok(())
         })
