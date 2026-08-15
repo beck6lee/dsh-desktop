@@ -100,8 +100,10 @@ Expected: 输出 `icon source written: .../dsh-desktop/icons/icon-source.png`
 
 - [ ] **Step 2: 生成全套图标**
 
-Run: `cd /Users/beck.lee/Desktop/dsh-workspace/dsh-desktop && npx tauri icon icons/icon-source.png`
+Run: `cd /Users/beck.lee/Desktop/dsh-workspace/dsh-desktop && npx tauri icon icons/icon-source.png --output src-tauri/icons`
 Expected: `src-tauri/icons/` 出现 `icon.icns`、`icon.png`、`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.ico` 等文件（`ls src-tauri/icons/` 确认）。
+
+> ⚠️ 注意：必须带 `--output src-tauri/icons`。不带时 tauri-cli（≥2.11）会因 `tauri.conf.json` 尚不存在（Task 3 才创建）而 panic（"Couldn't recognize the current folder as a Tauri project"）。Task 3 之后 `npm run icons`（不带 --output）即可正常工作，产物落点一致。
 
 - [ ] **Step 3: 提交**
 
