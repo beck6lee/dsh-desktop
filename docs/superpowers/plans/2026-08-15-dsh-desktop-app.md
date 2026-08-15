@@ -271,8 +271,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")
         .run(|app_handle, event| {
-            if let RunEvent::ExitRequested { .. } = event {
-                app_handle.state::<AppState>().server.stop();
+            // macOS Cmd+Q 只发 RunEvent::Exit（tao LoopDestroyed），不发 ExitRequested；
+            // 必须同时处理两者，否则退出清理不执行（Task 9 验收发现的真实 bug）。
+            // stop() 幂等，双触发无害。
+            match event {
+                RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+                    app_handle.state::<AppState>().server.stop();
+                }
+                _ => {}
             }
         });
 }
