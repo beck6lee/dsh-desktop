@@ -32,7 +32,7 @@
       const st = snapshot.state;
       if (st === 'ready' || st === 'reused') {
         // 整窗导航到 DSH：顶层页面 → localStorage 持久化 → 恢复上次会话
-        window.location.replace('http://127.0.0.1:' + snapshot.port);
+        window.location.replace('http://127.0.0.1:' + snapshot.port + '/?dsh=desktop');
       } else if (st === 'error') {
         fast = true;
         $('boot-text').textContent = '服务异常：' + (snapshot.error || '未知错误');
@@ -61,7 +61,7 @@
 
     if (!tauri) {
       // 浏览器预览模式：直接打开
-      window.location.replace('http://127.0.0.1:3080');
+      window.location.replace('http://127.0.0.1:3080/?dsh=desktop');
     } else {
       poll();
     }
