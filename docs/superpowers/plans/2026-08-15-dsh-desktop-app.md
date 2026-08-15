@@ -818,6 +818,13 @@ pub fn spawn_server(cmd: &ResolvedCommand, port: u16) -> std::io::Result<Child> 
 }
 
 fn process_alive(pid: i32) -> bool {
+    // 僵尸进程对 kill(pid, 0) 仍返回 0，无法据此区分；
+    // 先以 WNOHANG 收割：返回 pid 说明已退出（僵尸被收割），视为不存活。
+    let mut status: libc::c_int = 0;
+    let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if reaped == pid {
+        return false;
+    }
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
