@@ -178,7 +178,6 @@ fn process_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// 终止整个进程组：先 SIGTERM，2 秒后仍未退出则 SIGKILL。
 pub fn kill_group(child: &Child) {
     let pid = child.id() as i32;
     unsafe {
@@ -187,10 +186,12 @@ pub fn kill_group(child: &Child) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if !process_alive(pid) {
-            return;
+            break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // 无论直接子进程是否已退出，都对整个进程组补 SIGKILL，
+    // 确保无视 SIGTERM 的孙进程也被清理（组已空时 kill 返回 ESRCH，无害）。
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
     }
@@ -330,11 +331,40 @@ impl ServerManager {
     }
 
     pub fn status(&self) -> StatusSnapshot {
-        let (state, port, error) = match &*self.state.lock().unwrap() {
-            ServerState::Starting => ("starting".to_string(), None, None),
-            ServerState::Ready { port } => ("ready".to_string(), Some(*port), None),
-            ServerState::Reused { port } => ("reused".to_string(), Some(*port), None),
-            ServerState::Error(e) => ("error".to_string(), None, Some(e.clone())),
+        // 存活检查（spec 验收 5：手动 kill 服务后状态栏应转异常）：
+        // 同一锁内检测子进程退出并清空句柄，避免后续对已收割 pid 误发信号。
+        let child_exited = {
+            let mut guard = self.child.lock().unwrap();
+            let exited = guard
+                .as_mut()
+                .and_then(|c| c.try_wait().ok().flatten())
+                .is_some();
+            if exited {
+                *guard = None;
+            }
+            exited
+        };
+        let (state, port, error) = {
+            let mut st = self.state.lock().unwrap();
+            match &*st {
+                ServerState::Ready { port } if child_exited || !is_dsh_running(*port) => {
+                    *st = ServerState::Error("服务已停止（进程退出或端口无响应）".to_string());
+                    self.owned.store(false, Ordering::SeqCst);
+                    (
+                        "error".to_string(),
+                        None,
+                        Some("服务已停止（进程退出或端口无响应）".to_string()),
+                    )
+                }
+                ServerState::Reused { port } if !is_dsh_running(*port) => {
+                    *st = ServerState::Error("外部服务已停止".to_string());
+                    ("error".to_string(), None, Some("外部服务已停止".to_string()))
+                }
+                ServerState::Starting => ("starting".to_string(), None, None),
+                ServerState::Ready { port } => ("ready".to_string(), Some(*port), None),
+                ServerState::Reused { port } => ("reused".to_string(), Some(*port), None),
+                ServerState::Error(e) => ("error".to_string(), None, Some(e.clone())),
+            }
         };
         let pid = self.child.lock().unwrap().as_ref().map(|c| c.id());
         StatusSnapshot {
