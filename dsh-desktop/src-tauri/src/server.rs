@@ -383,6 +383,123 @@ impl ServerManager {
     }
 }
 
+// ---------- 更新检查 ----------
+
+/// 从 npm registry JSON 响应中提取版本号（纯字符串解析，避免 JSON 依赖）。
+pub fn extract_version_from_registry(body: &str) -> Option<String> {
+    const KEY: &str = "\"version\":\"";
+    let start = body.find(KEY)? + KEY.len();
+    let rest = &body[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// 解析 dsh 启动命令（复用现有逻辑）并查询其版本（`<dsh> --version`，最多等 5s）。
+pub fn query_dsh_version() -> Option<String> {
+    let npx_root = Path::new(&std::env::var("HOME").unwrap_or_default()).join(".npm/_npx");
+    // 先绑定到局部变量，避免 ResolveParams 借用临时值（E0716，同 start_inner）。
+    let dsh_env = std::env::var("DSH_DESKTOP_DSH").ok();
+    let node_env = std::env::var("DSH_DESKTOP_NODE").ok();
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let node_candidates = vec![PathBuf::from("/opt/homebrew/bin/node")];
+    let params = ResolveParams {
+        dsh_env: dsh_env.as_deref(),
+        node_env: node_env.as_deref(),
+        path_var: &path_var,
+        node_candidates: &node_candidates,
+        npx_root: &npx_root,
+    };
+    let cmd = resolve_command(&params)?;
+    let mut child = match &cmd {
+        ResolvedCommand::PathDsh { command } => Command::new(command)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .spawn()
+            .ok()?,
+        ResolvedCommand::NodeScript { node, script } => Command::new(node)
+            .arg(script)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .spawn()
+            .ok()?,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut out = String::new();
+    let _ = child.stdout.take().map(|mut s| s.read_to_string(&mut out));
+    out.lines().next().map(|s| s.trim().to_string())
+}
+
+/// 用系统 curl（macOS 自带）查询官方最新版本；npmjs 失败则回退 npmmirror。
+fn fetch_latest_version(url: &str) -> Option<String> {
+    let output = Command::new("/usr/bin/curl")
+        .args(["--max-time", "5", "-s", url])
+        .stdout(Stdio::piped())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&output.stdout);
+    extract_version_from_registry(&body)
+}
+
+pub fn query_latest_dsh_version() -> Option<String> {
+    const URLS: [&str; 2] = [
+        "https://registry.npmjs.org/@deepseek-ai/dsh/latest",
+        "https://registry.npmmirror.com/@deepseek-ai/dsh/latest",
+    ];
+    URLS.iter().find_map(|u| fetch_latest_version(u))
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    pub local_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub error: Option<String>,
+}
+
+pub fn check_update() -> UpdateInfo {
+    let local = query_dsh_version();
+    let latest = query_latest_dsh_version();
+    UpdateInfo {
+        error: match (&local, &latest) {
+            (Some(_), Some(_)) => None,
+            (None, _) => Some("无法解析本机 dsh 版本".to_string()),
+            (_, None) => Some("无法查询官方最新版本（网络？）".to_string()),
+        },
+        local_version: local,
+        latest_version: latest,
+    }
+}
+
+/// 托盘菜单版本行文案。
+pub fn format_update_text(info: &UpdateInfo) -> String {
+    match (&info.local_version, &info.latest_version) {
+        (Some(local), Some(latest)) if local == latest => {
+            format!("dsh 已是最新（v{local}）")
+        }
+        (Some(local), Some(latest)) => {
+            format!("dsh 有更新：v{local} → v{latest}")
+        }
+        (Some(local), None) => format!("dsh v{local}（最新版本查询失败）"),
+        (None, Some(latest)) => format!("本机 dsh 版本未知；官方最新 v{latest}"),
+        (None, None) => "dsh 版本检查失败".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,5 +681,46 @@ mod tests {
         assert!(!process_alive(child.id() as i32), "直接子进程应被杀死");
         assert!(!process_alive(grandchild), "进程组内的孙进程应被杀死");
         let _ = child.kill();
+    }
+
+    #[test]
+    fn extract_version_from_registry_parses() {
+        let body = r#"{"bin":{"dsh":"lib/bin.js"},"version":"0.1.0-rc.7","license":"MIT"}"#;
+        assert_eq!(
+            extract_version_from_registry(body),
+            Some("0.1.0-rc.7".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_version_from_registry_returns_none_on_garbage() {
+        assert_eq!(extract_version_from_registry("not json at all"), None);
+        assert_eq!(extract_version_from_registry(""), None);
+    }
+
+    #[test]
+    fn format_update_text_covers_all_cases() {
+        let mk = |l: Option<&str>, r: Option<&str>| UpdateInfo {
+            local_version: l.map(String::from),
+            latest_version: r.map(String::from),
+            error: None,
+        };
+        assert_eq!(
+            format_update_text(&mk(Some("0.1.0-rc.6"), Some("0.1.0-rc.6"))),
+            "dsh 已是最新（v0.1.0-rc.6）"
+        );
+        assert_eq!(
+            format_update_text(&mk(Some("0.1.0-rc.6"), Some("0.1.0-rc.7"))),
+            "dsh 有更新：v0.1.0-rc.6 → v0.1.0-rc.7"
+        );
+        assert_eq!(
+            format_update_text(&mk(Some("0.1.0-rc.6"), None)),
+            "dsh v0.1.0-rc.6（最新版本查询失败）"
+        );
+        assert_eq!(
+            format_update_text(&mk(None, Some("0.1.0-rc.7"))),
+            "本机 dsh 版本未知；官方最新 v0.1.0-rc.7"
+        );
+        assert_eq!(format_update_text(&mk(None, None)), "dsh 版本检查失败");
     }
 }

@@ -51,14 +51,19 @@ pub fn run() {
                 }
             });
 
-            // 托盘菜单：显示/隐藏窗口、退出
+            // 托盘菜单：dsh 版本显示（禁用）、检查更新、显示/隐藏窗口、退出
             let toggle = MenuItem::with_id(app, "toggle", "显示/隐藏窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&toggle, &quit])?;
+            let version_item = MenuItem::with_id(app, "dshver", "dsh 版本：检查中…", false, None::<&str>)?;
+            let update_item = MenuItem::with_id(app, "update", "检查更新", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&version_item, &update_item, &toggle, &quit])?;
+            // 启动自检用的版本行克隆：on_menu_event 的 move 闭包将持有 version_item 本体，
+            // 因此克隆必须先于 tray builder 构造。
+            let startup_item = version_item.clone();
             let mut tray_builder = TrayIconBuilder::new()
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| match event.id.as_ref() {
+                .on_menu_event(move |app, event| match event.id.as_ref() {
                     "toggle" => {
                         if let Some(win) = app.get_webview_window("main") {
                             if win.is_visible().unwrap_or(false) {
@@ -69,6 +74,18 @@ pub fn run() {
                             }
                         }
                     }
+                    "update" => {
+                        let app_handle = app.clone();
+                        let item = version_item.clone();
+                        let _ = item.set_text("dsh 版本：检查中…");
+                        std::thread::spawn(move || {
+                            let info = server::check_update();
+                            let text = server::format_update_text(&info);
+                            let _ = app_handle.run_on_main_thread(move || {
+                                let _ = item.set_text(text);
+                            });
+                        });
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 });
@@ -78,6 +95,16 @@ pub fn run() {
             // build() 内部将托盘强引用存入 app resources table，句柄无需持有；
             // 直接丢弃返回值不会移除系统托盘（tauri app.rs resources_table）。
             tray_builder.build(app)?;
+
+            // 启动时自动检查一次 dsh 版本（后台线程，结果经主线程更新菜单文本）
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let info = server::check_update();
+                let text = server::format_update_text(&info);
+                let _ = app_handle.run_on_main_thread(move || {
+                    let _ = startup_item.set_text(text);
+                });
+            });
 
             Ok(())
         })
