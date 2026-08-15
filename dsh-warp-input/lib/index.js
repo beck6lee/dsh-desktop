@@ -36,7 +36,14 @@ export function apply(ctx) {
       const sess = invocation.agent && invocation.agent.session
       const cwd = sess && sess.header ? sess.header.cwd : undefined
       try {
-        const request = { command: line, timeoutMs: DEFAULT_TIMEOUT_MS }
+        // 注入标准 macOS PATH（含 Homebrew），避免 dsh 进程精简 PATH 下 npm/brew 等找不到
+        const request = {
+          command: line,
+          timeoutMs: DEFAULT_TIMEOUT_MS,
+          env: {
+            PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+          },
+        }
         if (typeof cwd === 'string' && cwd) request.workdir = cwd
         const spec = shell.resolve(request)
         const result = await shell.run(spec)
