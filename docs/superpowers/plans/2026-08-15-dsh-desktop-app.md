@@ -104,6 +104,8 @@ Run: `cd /Users/beck.lee/Desktop/dsh-workspace/dsh-desktop && npx tauri icon ico
 Expected: `src-tauri/icons/` 出现 `icon.icns`、`icon.png`、`32x32.png`、`128x128.png`、`128x128@2x.png`、`icon.ico` 等文件（`ls src-tauri/icons/` 确认）。
 
 > ⚠️ 注意：必须带 `--output src-tauri/icons`。不带时 tauri-cli（≥2.11）会因 `tauri.conf.json` 尚不存在（Task 3 才创建）而 panic（"Couldn't recognize the current folder as a Tauri project"）。Task 3 之后 `npm run icons`（不带 --output）即可正常工作，产物落点一致。
+>
+> ℹ️ 再生成提示：`tauri icon` 每次生成的 `icon.icns` 容器字节序可能不同（chunk 内容一致，HashMap 迭代顺序导致），macOS 忽略顺序不影响使用；若重跑 `npm run icons` 后 git 显示 `icon.icns` 变动属正常现象。
 
 - [ ] **Step 3: 提交**
 
