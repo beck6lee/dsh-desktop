@@ -895,13 +895,18 @@ impl ServerManager {
             *self.state.lock().unwrap() = ServerState::Error("没有可用端口".to_string());
             return;
         };
+        // 先绑定到局部变量，避免 ResolveParams 借用临时值（E0716，Task 5 审查发现）
+        let dsh_env = std::env::var("DSH_DESKTOP_DSH").ok();
+        let node_env = std::env::var("DSH_DESKTOP_NODE").ok();
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        let node_candidates = vec![PathBuf::from("/opt/homebrew/bin/node")];
         let npx_root = Path::new(&std::env::var("HOME").unwrap_or_default())
             .join(".npm/_npx");
         let params = ResolveParams {
-            dsh_env: std::env::var("DSH_DESKTOP_DSH").ok().as_deref(),
-            node_env: std::env::var("DSH_DESKTOP_NODE").ok().as_deref(),
-            path_var: std::env::var("PATH").unwrap_or_default().as_str(),
-            node_candidates: &[PathBuf::from("/opt/homebrew/bin/node")],
+            dsh_env: dsh_env.as_deref(),
+            node_env: node_env.as_deref(),
+            path_var: &path_var,
+            node_candidates: &node_candidates,
             npx_root: &npx_root,
         };
         let Some(cmd) = resolve_command(&params) else {
