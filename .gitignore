@@ -9,3 +9,6 @@ src-tauri/gen/
 
 # macOS
 .DS_Store
+
+# dsh-warp-input 已独立成仓库（git@github.com:beck6lee/dsh-warp-input.git）
+dsh-warp-input/
